@@ -1,0 +1,50 @@
+{
+  "name": "zeami4",
+  "version": "1.0.0",
+  "description": "Auto-development system powered by Claude Code",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:workflows": "node tests/workflows/runner.js",
+    "pre-check": "node scripts/pre-completion-check.js",
+    "work-unit": "node scripts/work-unit-start.js",
+    "branch": "node scripts/create-branch.js",
+    "lint": "eslint src/**/*.ts",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "voice:start": "tsx src/voice/voice-assistant.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hiranotomo/zeami4.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/hiranotomo/zeami4/issues"
+  },
+  "homepage": "https://github.com/hiranotomo/zeami4#readme",
+  "devDependencies": {
+    "@octokit/plugin-retry": "^8.0.3",
+    "@octokit/plugin-throttling": "^11.0.3",
+    "@octokit/rest": "^22.0.1",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.10.1",
+    "@typescript-eslint/eslint-plugin": "^8.47.0",
+    "@typescript-eslint/parser": "^8.47.0",
+    "eslint": "^9.39.1",
+    "jest": "^30.2.0",
+    "prettier": "^3.6.2",
+    "ts-jest": "^29.4.5",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@elevenlabs/client": "^0.11.0",
+    "dotenv": "^17.2.3"
+  }
+}

@@ -1,0 +1,114 @@
+name: 📚 フェーズ学習
+description: 各フェーズ（0〜5）の学習を開始する時に使う
+title: "📚 フェーズX: [タイトル] を学ぶ"
+labels: ["学習"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## フェーズ学習を開始します
+
+        このフォームを使用して、新しいフェーズの学習Issueを作成します。
+        **すべての必須項目を入力してください。**
+
+  - type: dropdown
+    id: phase-number
+    attributes:
+      label: フェーズ番号
+      description: 学習するフェーズを選択してください
+      options:
+        - "フェーズ1"
+        - "フェーズ2"
+        - "フェーズ3"
+        - "フェーズ4"
+        - "フェーズ5"
+    validations:
+      required: true
+
+  - type: input
+    id: phase-name
+    attributes:
+      label: フェーズ名
+      description: 学習するフェーズの名前を入力してください
+      placeholder: "例: GitHub Actions基礎理解"
+    validations:
+      required: true
+
+  - type: input
+    id: estimated-time
+    attributes:
+      label: 想定時間
+      description: このフェーズにかける予定の時間
+      placeholder: "例: 30分"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: learning-goals
+    attributes:
+      label: 学習目標
+      description: このフェーズで理解すべき概念
+      options:
+        - label: 概念1を理解する
+        - label: 概念2を理解する
+        - label: 概念3を理解する
+
+  - type: checkboxes
+    id: implementation
+    attributes:
+      label: 実装内容
+      description: LLMが実装する内容
+      options:
+        - label: ワークフロー実装
+        - label: サンプルコード追加
+        - label: ドキュメント作成
+        - label: テスト追加
+
+  - type: checkboxes
+    id: completion
+    attributes:
+      label: 完了条件
+      description: フェーズ完了の条件
+      options:
+        - label: 実装が完了し、動作確認できた
+          required: false
+        - label: ドキュメントを読んで概念を理解した
+          required: false
+        - label: 学習メモを書いた
+          required: false
+        - label: 理解度チェックリストをクリアした
+          required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 学習メモ
+      description: 学習を進めながら、気づいたことを記録
+      placeholder: |
+        - 学んだこと
+        - つまずいたポイント
+        - 次に試したいこと
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        ## ⚠️ Issue作成後に必ず実施
+
+        このIssueを作成した後、**必ず以下を実行してください**:
+
+        1. **Milestoneを設定**
+           - 右サイドバーの「Milestone」をクリック
+           - 選択したフェーズに対応するMilestoneを選択
+             - フェーズ1 → "フェーズ1: GitHub Actions基礎理解"
+             - フェーズ2 → "フェーズ2: LLM統合の概念"
+             - フェーズ3 → "フェーズ3: 自動化の設計思想"
+             - フェーズ4 → "フェーズ4: E2Eテスト戦略"
+             - フェーズ5 → "フェーズ5: 運用と最適化"
+
+        2. **ラベルを確認**
+           - 「学習」ラベルが付いていることを確認
+           - 必要に応じて追加のラベルを設定
+
+        **Milestone設定を忘れると、進捗が追跡できなくなります！**

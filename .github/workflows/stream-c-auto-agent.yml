@@ -1,0 +1,64 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Auto-agent for issue resolution
+# Triggers: workflow_dispatch, issues
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🤖 Auto Agent Runner
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  check-trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # auto-runラベルが付いているIssueのみ実行
+    if: contains(github.event.issue.labels.*.name, 'auto-run')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run auto agent for issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEST_REPO: ${{ github.repository }}
+        run: |
+          node tests/workflows/runner.js autorun \
+            --issue ${{ github.event.issue.number }} \
+            --agent auto
+
+      - name: Comment on issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = context.issue.number;
+            const success = '${{ job.status }}' === 'success';
+
+            const body = success
+              ? '🤖 Auto-agent execution completed successfully! Check the PR created by this workflow.'
+              : '❌ Auto-agent execution failed. Check the workflow logs for details.';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body
+            });

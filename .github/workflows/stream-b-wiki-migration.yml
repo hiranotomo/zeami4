@@ -1,0 +1,175 @@
+# Event Model v1 - STREAM B: Meta-Operations
+# Purpose: Wiki migration operations
+# Triggers: workflow_dispatch
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 📚 Wiki Migration
+
+on:
+  pull_request:
+    types: [closed]
+    paths:
+      - 'docs/**/*.md'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  check-and-migrate:
+    name: Check and Migrate Docs to Wiki
+    # Only run on merged PRs AND skip on push events (workflow only designed for pull_request context)
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed docs files
+        id: changed-files
+        run: |
+          # Get list of changed files in docs/
+          CHANGED_DOCS=$(gh pr view ${{ github.event.pull_request.number }} \
+            --json files --jq '.files[].path' | grep '^docs/.*\.md$' || true)
+
+          echo "Changed docs files:"
+          echo "$CHANGED_DOCS"
+
+          # Save to output
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_DOCS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Count files
+          COUNT=$(echo "$CHANGED_DOCS" | grep -c '.' || echo "0")
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check against allowed list
+        id: check-allowed
+        if: steps.changed-files.outputs.count > 0
+        run: |
+          # Define allowed local docs (keep these in repo)
+          ALLOWED_LIST=(
+            "README.md"
+            "CONTRIBUTING.md"
+            "CHANGELOG.md"
+            "LICENSE.md"
+          )
+
+          NEEDS_MIGRATION=""
+
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+
+            BASENAME=$(basename "$file")
+            ALLOWED=false
+
+            for allowed in "${ALLOWED_LIST[@]}"; do
+              if [[ "$BASENAME" == "$allowed" ]]; then
+                ALLOWED=true
+                echo "✅ Allowed: $file"
+                break
+              fi
+            done
+
+            if [[ "$ALLOWED" == "false" ]]; then
+              echo "⚠️ Needs migration: $file"
+              NEEDS_MIGRATION="${NEEDS_MIGRATION}${file}"$'\n'
+            fi
+          done <<< "${{ steps.changed-files.outputs.files }}"
+
+          echo "migration-files<<EOF" >> $GITHUB_OUTPUT
+          echo "$NEEDS_MIGRATION" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          MIGRATION_COUNT=$(echo "$NEEDS_MIGRATION" | grep -c '.' || echo "0")
+          echo "migration-count=$MIGRATION_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Post migration warning
+        if: steps.check-allowed.outputs.migration-count > 0
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const files = `${{ steps.check-allowed.outputs.migration-files }}`.trim().split('\n').filter(f => f);
+
+            const body = `## ⚠️ ドキュメント移行が必要です
+
+このPRで以下のファイルが \`docs/\` 配下に作成/更新されました：
+
+${files.map(f => `- \`${f}\``).join('\n')}
+
+### 📚 Wiki移行ポリシー
+
+プロジェクトのドキュメントは **GitHub Wiki** で管理しています（Issue #351）。
+
+### 🔧 必要なアクション
+
+1. **Wiki Migration Agent を起動**
+   - これらのファイルをWikiに移行します
+   - ローカルファイルを削除するPRを作成します
+
+2. **手動での移行**（Agent未対応の場合）
+   - Wikiにページを作成: https://github.com/${context.repo.owner}/${context.repo.repo}/wiki
+   - 内容をコピー＆ペースト
+   - ローカルファイルを削除するPR作成
+
+### 📖 関連
+
+- Issue #421: Wiki移行ルール徹底の仕組み化
+- Issue #351: Wiki移行完了
+- [Wiki ドキュメント管理ポリシー](https://github.com/${context.repo.owner}/${context.repo.repo}/wiki/ドキュメント管理ポリシー)
+
+---
+
+🤖 このコメントは自動生成されました`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Add wiki-migration label
+        if: steps.check-allowed.outputs.migration-count > 0
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ['wiki-migration']
+              });
+            } catch (error) {
+              // Label might not exist, create it
+              if (error.status === 422) {
+                console.log('Label does not exist, skipping');
+              } else {
+                throw error;
+              }
+            }
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 📚 Wiki Migration Check Summary"
+          echo ""
+          echo "**Total docs files changed**: ${{ steps.changed-files.outputs.count }}"
+          echo "**Files needing migration**: ${{ steps.check-allowed.outputs.migration-count }}"
+          echo ""
+
+          if [ "${{ steps.check-allowed.outputs.migration-count }}" -gt 0 ]; then
+            echo "⚠️ Migration required - Check PR comments for details"
+          else
+            echo "✅ No migration needed - All files are in allowed list"
+          fi

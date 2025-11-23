@@ -1,0 +1,107 @@
+name: 🤖 Workflow Bug (Auto-Detected)
+description: Automatically created by workflow-failure-detector for CI/CD failures
+title: "🤖 Workflow Bug: "
+labels: ["workflow-bug", "auto-healing", "needs-review"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🚨 自動検出: ワークフロー異常
+
+        このIssueはworkflow-failure-detectorにより自動作成されました。
+
+        ### 自動修復プロセス
+
+        1. ✅ **自動検出**: workflow-failure-detectorが失敗を検出
+        2. ✅ **Issue作成**: このIssueが自動作成される
+        3. 🔄 **自動修復**: Claude Code Actionが起動して修正PRを作成
+        4. ⏳ **レビュー**: 人間がPRをレビュー・マージ
+
+  - type: input
+    id: workflow_name
+    attributes:
+      label: ワークフロー名
+      description: 失敗しているワークフローまたはジョブ名
+      placeholder: "例: Validate Commit Message"
+    validations:
+      required: true
+
+  - type: input
+    id: failure_rate
+    attributes:
+      label: 失敗率
+      description: 失敗率（パーセンテージ）
+      placeholder: "例: 100.0% (9/9)"
+    validations:
+      required: true
+
+  - type: input
+    id: run_url
+    attributes:
+      label: 失敗Run URL
+      description: GitHub Actions実行ページのURL
+      placeholder: "https://github.com/owner/repo/actions/runs/12345"
+    validations:
+      required: true
+
+  - type: textarea
+    id: error_log
+    attributes:
+      label: エラーログ
+      description: 失敗したジョブのエラーログ（最初の100行程度）
+      placeholder: |
+        Run: 19591730904
+        Job: Check Commit Message Format
+        Error: Repository not found
+      render: shell
+
+  - type: dropdown
+    id: error_type
+    attributes:
+      label: エラータイプ（推定）
+      description: エラーの種類を選択（自動判定結果）
+      options:
+        - Unknown
+        - Infrastructure Error (API/Network)
+        - Code Bug
+        - Configuration Error
+        - Dependency Issue
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 深刻度
+      description: システムへの影響度
+      options:
+        - Critical (100% failure rate)
+        - High (>80% failure rate)
+        - Medium (50-80% failure rate)
+        - Low (<50% failure rate)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: auto_healing
+    attributes:
+      label: 自動修復オプション
+      description: 自動修復の設定
+      options:
+        - label: Claude Code Actionで自動修復を試行
+          required: false
+        - label: False Positive（インフラエラー）の可能性をチェック
+          required: false
+        - label: 人間のレビューを待つ
+          required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 追加情報
+      description: 修正に役立つ追加情報
+      placeholder: |
+        - 最近のコード変更
+        - 関連するPR
+        - 既知の問題

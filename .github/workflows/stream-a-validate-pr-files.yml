@@ -1,0 +1,181 @@
+# Event Model v1 - STREAM A: PR-Lifecycle
+# Purpose: Validate required files in PR
+# Triggers: pull_request
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: Validate Required Files
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-required-files:
+    name: Check Required File Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check Phase Completion Files
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const title = pr.title;
+
+            console.log(`Checking PR: ${title}`);
+
+            // フェーズ完了PRの判定
+            const phaseCompletionPattern = /フェーズ(\d+).*完了|phase\s*(\d+).*complete/i;
+            const match = title.match(phaseCompletionPattern);
+
+            if (!match) {
+              console.log('Not a phase completion PR, skipping file check');
+              return;
+            }
+
+            const phaseNum = match[1] || match[2];
+            console.log(`Detected phase completion PR: Phase ${phaseNum}`);
+
+            // PRで変更されたファイルを取得
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+
+            console.log(`Files changed: ${files.length}`);
+
+            // ========== テスト追加の検証 ==========
+
+            // テスト追加の検証
+            const sourceChanges = files.filter(f =>
+              f.filename.startsWith('src/') &&
+              !f.filename.includes('.spec.') &&
+              !f.filename.includes('.test.') &&
+              (f.filename.endsWith('.ts') || f.filename.endsWith('.js'))
+            );
+
+            const testChanges = files.filter(f =>
+              f.filename.includes('.spec.') ||
+              f.filename.includes('.test.') ||
+              f.filename.startsWith('tests/')
+            );
+
+            console.log(`Source files changed: ${sourceChanges.length}`);
+            console.log(`Test files changed: ${testChanges.length}`);
+
+            // ソースコードが変更されているのにテストがない場合
+            if (sourceChanges.length > 0 && testChanges.length === 0) {
+              const warningMessage = [
+                '## ⚠️ テストファイルの変更が見つかりません',
+                '',
+                'このPRは以下のソースコードを変更していますが、テストファイルの変更がありません:',
+                '',
+                sourceChanges.map(f => `- \`${f.filename}\``).join('\n'),
+                '',
+                '### 推奨事項:',
+                '1. 新機能にはテストを追加してください',
+                '2. バグ修正の場合も、再発防止のテストを追加してください',
+                '3. リファクタリングの場合は、既存テストが通ることを確認してください',
+                '',
+                '### 例外ケース:',
+                '以下の場合はテストなしでも問題ありません:',
+                '- ドキュメントのみの変更',
+                '- 型定義のみの変更',
+                '- 設定ファイルのみの変更',
+                '',
+                'その場合は、PRの本文にその旨を記載してください。'
+              ].join('\n');
+
+              core.warning('⚠️ テストファイルの変更がありません');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: warningMessage
+              });
+            } else if (sourceChanges.length > 0 && testChanges.length > 0) {
+              console.log('✅ Both source and test files are changed');
+            }
+
+            // ========== テスト追加の検証ここまで ==========
+
+            // 必須ファイルの定義
+            const requiredFiles = [
+              `docs/learning/phase${phaseNum}/notes.md`
+            ];
+
+            const missingFiles = [];
+
+            for (const reqFile of requiredFiles) {
+              const hasFile = files.some(f => f.filename === reqFile);
+
+              if (!hasFile) {
+                // ファイルが存在するかチェック（新規作成の場合もあるため）
+                try {
+                  await github.rest.repos.getContent({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    path: reqFile,
+                    ref: pr.head.ref
+                  });
+                  console.log(`✅ ${reqFile} exists (not changed in this PR)`);
+                } catch (error) {
+                  if (error.status === 404) {
+                    missingFiles.push(reqFile);
+                    console.log(`❌ ${reqFile} is missing`);
+                  }
+                }
+              } else {
+                console.log(`✅ ${reqFile} is changed in this PR`);
+              }
+            }
+
+            if (missingFiles.length > 0) {
+              const errorMessage = [
+                `## ❌ 必須ファイルの更新が見つかりません`,
+                '',
+                `このPRは「フェーズ${phaseNum}完了」を示していますが、以下の必須ファイルが更新されていません:`,
+                '',
+                missingFiles.map(f => `- \`${f}\``).join('\n'),
+                '',
+                '### 修正方法:',
+                `1. 学習メモを \`docs/learning/phase${phaseNum}/notes.md\` に記入してください`,
+                '2. 学んだこと、気づいたこと、つまずいた点などを記録してください',
+                '',
+                '### なぜ必要？',
+                '- 学習プロセスの完全性を保証',
+                '- 「やったつもり」を防ぐ',
+                '- 振り返りと知識定着のため'
+              ].join('\n');
+
+              core.setFailed(`❌ 必須ファイルが見つかりません: ${missingFiles.join(', ')}`);
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: errorMessage
+              });
+            } else {
+              console.log('✅ All required files are present');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: `✅ フェーズ${phaseNum}完了の必須ファイルが確認できました。`
+              });
+            }

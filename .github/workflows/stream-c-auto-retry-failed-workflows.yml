@@ -1,0 +1,41 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Auto-retry failed workflows via polling
+# Triggers: schedule (every 30min)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🔄 失敗ワークフロー自動リトライ
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # 30分ごとに polling
+  workflow_dispatch:
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Fetch failed workflow runs (last 1 hour)
+        id: failed
+        run: |
+          gh api repos/${{ github.repository }}/actions/runs \
+            --jq '.workflow_runs[] | select(.conclusion == "failure" and (.created_at | fromdateiso8601) > (now - 3600)) | {id, name, created_at}' \
+            > failed_runs.json
+          cat failed_runs.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retry failed runs
+        run: |
+          for run_id in $(jq -r '.id' failed_runs.json); do
+            echo "Retrying run $run_id"
+            gh api repos/${{ github.repository }}/actions/runs/$run_id/rerun -X POST || true
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,116 @@
+# Event Model v1 - STREAM A: PR-Lifecycle
+# Purpose: Validate branch naming convention
+# Triggers: pull_request
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: Validate Branch Name
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  validate-branch-name:
+    name: Check Branch Naming Convention
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Validate branch name format
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // PRの場合はhead_ref、直接pushの場合はref_nameを使用
+            const branch = context.payload.pull_request
+              ? context.payload.pull_request.head.ref
+              : context.ref.replace('refs/heads/', '');
+
+            console.log(`Checking branch name: ${branch}`);
+
+            // 許可されるブランチ名のパターン（シンプル化版）
+            // {type}/{issue番号}-{description}
+            // type: feature, hotfix, docs, test, fix
+            // description: 任意の説明（英数字、ハイフン、アンダースコア）
+            const validPattern = /^(feature|hotfix|docs|test|fix)\/\d+-[\w-]+$/;
+
+            if (!validPattern.test(branch)) {
+              const errorMessage = [
+                '## ❌ ブランチ名が命名規則に従っていません',
+                '',
+                `現在のブランチ名: \`${branch}\``,
+                '',
+                '### 正しい形式:',
+                '```',
+                '{type}/{Issue番号}-{description}',
+                '',
+                'type: feature, hotfix, docs, test, fix',
+                'description: 任意の説明（英数字、ハイフン、アンダースコア）',
+                '```',
+                '',
+                '### 例:',
+                '- `feature/183-add-auto-merge` ✅',
+                '- `hotfix/200-fix-validation` ✅',
+                '- `docs/194-update-readme` ✅',
+                '- `test/201-add-workflow-tests` ✅',
+                '- `fix/185-branch-naming` ✅',
+                '',
+                '### なぜ必要？',
+                '- Issue-PR-Closeサイクルの完全性を保証',
+                '- LLMがIssue番号を忘れることを防止',
+                '- 変更の追跡可能性を確保',
+                '',
+                '### 修正方法:',
+                '1. 関連するIssueを作成（または既存Issueを確認）',
+                '2. 正しい形式のブランチを作成:',
+                '   ```bash',
+                '   # ブランチ作成',
+                '   git checkout -b feature/{Issue番号}-{description}',
+                '   # 例: feature/183-add-auto-merge',
+                '   ',
+                '   git cherry-pick {現在のコミット}',
+                '   ```',
+                '',
+                '### このチェックをスキップする場合:',
+                '特別な理由がある場合は、PRに「skip-branch-check」ラベルを追加してください。'
+              ].join('\n');
+
+              // PRの場合はコメントを投稿
+              if (context.payload.pull_request) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  body: errorMessage
+                });
+              }
+
+              core.setFailed(`::error title=🔴 対応必要: ブランチ名検証失敗::ブランチ名が命名規則に従っていません`);
+              core.setFailed(`ブランチ名が命名規則に従っていません: ${branch}`);
+            } else {
+              console.log(`✅ Branch name is valid: ${branch}`);
+              console.log('::notice title=✅ 対応不要: ブランチ名検証成功::ブランチ名が正しい形式です');
+
+              // ブランチ情報を抽出
+              const match = branch.match(/\/(\d+)-([\w-]+)$/);
+              const issueNumber = match[1];
+              const description = match[2];
+              console.log(`Branch validated - Issue: ${issueNumber}, Description: ${description}`);
+
+              // PRの場合、成功メッセージを投稿
+              if (context.payload.pull_request) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  body: `✅ ブランチ名が正しい形式です\n\n` +
+                    `- **Branch**: \`${branch}\`\n` +
+                    `- **Issue**: #${issueNumber}\n` +
+                    `- **Description**: ${description}`
+                });
+              }
+            }

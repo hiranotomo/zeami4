@@ -1,0 +1,165 @@
+# Event Model v1 - STREAM A: PR-Lifecycle
+# Purpose: Post-merge verification on main
+# Triggers: workflow_run (specific workflows)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🔍 Post-Merge Verification
+
+# Verify that merged changes work correctly in production (main branch)
+# Triggers after specific critical workflows complete on main
+on:
+  workflow_run:
+    workflows:
+      - "CI/CD Pipeline"  # ci.yml
+      - "PR Validation"   # validate-pr.yml
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read  # Required to read workflow run data
+
+jobs:
+  verify-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 10  # Fetch recent history for merge commit analysis
+
+      - name: Identify merged PR and changes
+        id: identify
+        run: |
+          # Get PR number from merge commit message
+          COMMIT_MSG=$(git log -1 --format="%s")
+          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oE "#[0-9]+" | head -1 | tr -d '#')
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR number found in commit message, skipping verification"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Get changed files from last commit
+          CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD)
+
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "📊 Merged PR #$PR_NUMBER"
+          echo "📁 Changed files:"
+          echo "$CHANGED_FILES"
+
+      - name: Verify workflow changes
+        if: steps.identify.outputs.skip == 'false' && contains(steps.identify.outputs.changed_files, '.github/workflows/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e  # Don't exit on errors, we want to collect all issues
+
+          CHANGED_FILES="${{ steps.identify.outputs.changed_files }}"
+          WORKFLOWS=$(echo "$CHANGED_FILES" | grep "\.github/workflows/")
+
+          FAILED_WORKFLOWS=""
+
+          for workflow in $WORKFLOWS; do
+            WORKFLOW_NAME=$(basename "$workflow")
+            echo "🔍 Verifying workflow: $WORKFLOW_NAME"
+
+            # Check if workflow has workflow_dispatch trigger
+            if gh workflow view "$WORKFLOW_NAME" 2>/dev/null | grep -q "workflow_dispatch"; then
+              echo "  ✅ Has workflow_dispatch, attempting manual trigger..."
+              gh workflow run "$WORKFLOW_NAME" 2>/dev/null || echo "  ⚠️  Manual trigger failed (may be expected)"
+            fi
+
+            # Check recent execution history (last 2 hours)
+            RECENT_RUNS=$(gh run list --workflow="$WORKFLOW_NAME" --limit 10 --json conclusion,createdAt)
+            RECENT_COUNT=$(echo "$RECENT_RUNS" | jq '. | length')
+
+            if [ "$RECENT_COUNT" -eq 0 ]; then
+              echo "  ⚠️  Warning: Workflow has never executed"
+              FAILED_WORKFLOWS="$FAILED_WORKFLOWS\n- $WORKFLOW_NAME (never executed)"
+            else
+              # Check if any runs succeeded recently
+              SUCCESS_COUNT=$(echo "$RECENT_RUNS" | jq '[.[] | select(.conclusion == "success")] | length')
+              if [ "$SUCCESS_COUNT" -eq 0 ]; then
+                echo "  ⚠️  Warning: No successful runs found"
+              else
+                echo "  ✅ Workflow has successful runs"
+              fi
+            fi
+          done
+
+          if [ -n "$FAILED_WORKFLOWS" ]; then
+            echo "failed_workflows<<EOF" >> $GITHUB_ENV
+            echo -e "$FAILED_WORKFLOWS" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          fi
+
+      - name: Report verification results
+        if: steps.identify.outputs.skip == 'false' && env.failed_workflows != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = '${{ steps.identify.outputs.pr_number }}';
+            const failedWorkflows = process.env.failed_workflows;
+            const changedFiles = `${{ steps.identify.outputs.changed_files }}`;
+
+            const body = `## 🚨 Post-Merge Verification Warning
+
+            PR #${prNumber} was merged but some workflows may not be functioning correctly.
+
+            ### Workflows with Issues
+
+            ${failedWorkflows}
+
+            ### Changed Files
+
+            \`\`\`
+            ${changedFiles}
+            \`\`\`
+
+            ### Recommended Actions
+
+            1. Check if these workflows should have been triggered
+            2. Manually test workflows using \`gh workflow run <workflow-name>\`
+            3. Review workflow trigger conditions (\`on:\` section)
+            4. If critical, consider reverting the merge
+
+            ### Links
+
+            - [Changed Workflows](https://github.com/${{ github.repository }}/tree/main/.github/workflows)
+            - [Recent Workflow Runs](https://github.com/${{ github.repository }}/actions)
+
+            ---
+
+            🤖 Auto-generated by [Post-Merge Verification](https://github.com/${{ github.repository }}/blob/main/.github/workflows/post-merge-verification.yml)
+            `;
+
+            // Post comment on the PR
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: body
+            });
+
+            console.log(`✅ Posted verification warning to PR #${prNumber}`);
+
+      - name: Verification complete
+        if: steps.identify.outputs.skip == 'false'
+        run: |
+          if [ -n "${{ env.failed_workflows }}" ]; then
+            echo "⚠️  Verification completed with warnings"
+          else
+            echo "✅ Verification passed - all workflows appear healthy"
+          fi

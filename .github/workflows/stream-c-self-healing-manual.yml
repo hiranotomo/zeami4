@@ -1,0 +1,278 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Manual self-healing trigger
+# Triggers: workflow_dispatch
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🔧 手動自己修復
+
+on:
+  workflow_dispatch:
+    inputs:
+      workflow_file:
+        description: '修復するワークフローファイルのパス（例: .github/workflows/auto-create-issue.yml）'
+        required: true
+        type: string
+      error_description:
+        description: 'エラーの説明'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  analyze-and-fix:
+    name: Analyze & Generate Fix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      issue_number: ${{ steps.create-issue.outputs.issue_number }}
+      branch_name: ${{ steps.create-branch.outputs.branch_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read workflow file
+        id: read-workflow
+        run: |
+          WORKFLOW_FILE="${{ github.event.inputs.workflow_file }}"
+
+          if [ ! -f "$WORKFLOW_FILE" ]; then
+            echo "❌ Workflow file not found: $WORKFLOW_FILE"
+            exit 1
+          fi
+
+          echo "✅ Reading workflow file: $WORKFLOW_FILE"
+
+          # ファイル内容を読み込み（エスケープ処理）
+          CONTENT=$(cat "$WORKFLOW_FILE" | jq -Rs .)
+          echo "content=$CONTENT" >> $GITHUB_OUTPUT
+
+      - name: Create Issue for fix
+        id: create-issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const workflowFile = ${{ toJSON(github.event.inputs.workflow_file) }};
+            const errorDesc = ${{ toJSON(github.event.inputs.error_description) }};
+
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🤖 Auto: Fix workflow bug in ${workflowFile.split('/').pop()}`,
+              body: [
+                '## 🤖 自己修復システムによる自動Issue',
+                '',
+                '### 検出された問題',
+                '',
+                `- **ワークフロー**: \`${workflowFile}\``,
+                `- **エラー**: ${errorDesc}`,
+                '',
+                '### 修復プロセス',
+                '',
+                '1. ✅ Issue作成（このIssue）',
+                '2. 🔄 LLMによる修正案生成（実行中...）',
+                '3. ⏳ PR作成（自動）',
+                '4. 👀 人間によるレビュー',
+                '5. ✅ マージ',
+                '',
+                '### 次のステップ',
+                '',
+                '自動的にPRが作成されます。レビューして承認してください。',
+                '',
+                '---',
+                '',
+                '🤖 このIssueは自己修復システムによって自動生成されました。',
+                '',
+                `Triggered by: @${context.actor}`,
+                `Workflow: ${workflowFile}`
+              ].join('\n'),
+              labels: ['auto-healing', 'bug', 'needs-review']
+            });
+
+            console.log(`✅ Created issue #${issue.data.number}`);
+            core.setOutput('issue_number', issue.data.number);
+            return issue.data.number;
+
+      - name: Generate fix with Claude API
+        id: generate-fix
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          WORKFLOW_FILE="${{ github.event.inputs.workflow_file }}"
+          ERROR_DESC="${{ github.event.inputs.error_description }}"
+          WORKFLOW_CONTENT=$(cat "$WORKFLOW_FILE")
+
+          # Claude APIリクエストのペイロードを作成
+          REQUEST_BODY=$(cat <<EOF
+          {
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 8192,
+            "messages": [{
+              "role": "user",
+              "content": "以下のGitHub Actionsワークフローにバグがあります。修正してください。\n\n## ワークフローファイル\n\`\`\`yaml\n${WORKFLOW_CONTENT}\n\`\`\`\n\n## エラーの説明\n${ERROR_DESC}\n\n## タスク\n1. バグの原因を特定してください\n2. 修正案を生成してください\n3. 修正後の完全なYAMLファイルを出力してください\n\n## 出力形式\n以下の形式で出力してください:\n\n### 原因\n[バグの原因の説明]\n\n### 修正内容\n[何を修正したか]\n\n### 修正後のコード\n\`\`\`yaml\n[修正後の完全なYAMLファイル]\n\`\`\`"
+            }]
+          }
+          EOF
+          )
+
+          echo "🤖 Calling Claude API..."
+
+          # Claude APIを呼び出し
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$REQUEST_BODY")
+
+          # レスポンスからテキストを抽出
+          FIX_CONTENT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+          if [ -z "$FIX_CONTENT" ] || [ "$FIX_CONTENT" = "null" ]; then
+            echo "❌ Failed to generate fix"
+            echo "$RESPONSE" | jq .
+            exit 1
+          fi
+
+          echo "✅ Fix generated successfully"
+
+          # 修正内容をファイルに保存
+          echo "$FIX_CONTENT" > /tmp/fix_explanation.md
+
+          # YAMLコードを抽出
+          echo "$FIX_CONTENT" | sed -n '/```yaml/,/```/p' | sed '1d;$d' > /tmp/fixed_workflow.yml
+
+          if [ ! -s /tmp/fixed_workflow.yml ]; then
+            echo "❌ Failed to extract YAML from fix"
+            exit 1
+          fi
+
+          echo "✅ Extracted fixed YAML"
+
+          # 出力設定
+          echo "explanation<<EOF" >> $GITHUB_OUTPUT
+          cat /tmp/fix_explanation.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create branch and commit fix
+        id: create-branch
+        run: |
+          ISSUE_NUMBER=${{ steps.create-issue.outputs.issue_number }}
+          WORKFLOW_FILE="${{ github.event.inputs.workflow_file }}"
+          BRANCH_NAME="fix/${ISSUE_NUMBER}-auto-heal-workflow"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "$BRANCH_NAME"
+
+          # 修正内容を適用
+          cp /tmp/fixed_workflow.yml "$WORKFLOW_FILE"
+
+          git add "$WORKFLOW_FILE"
+          git commit -m "fix: #${ISSUE_NUMBER} Auto-heal $(basename $WORKFLOW_FILE)
+
+          🤖 自己修復システムによる自動修正
+
+          - 修正ファイル: $WORKFLOW_FILE
+          - エラー: ${{ github.event.inputs.error_description }}
+
+          🤖 Generated with Claude Code Self-Healing System
+
+          Co-Authored-By: Claude <noreply@anthropic.com>"
+
+          git push -u origin "$BRANCH_NAME"
+
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "✅ Branch created and pushed: $BRANCH_NAME"
+
+      - name: Create Pull Request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = ${{ steps.create-issue.outputs.issue_number }};
+            const branchName = ${{ toJSON(steps.create-branch.outputs.branch_name) }};
+            const workflowFile = ${{ toJSON(github.event.inputs.workflow_file) }};
+            const explanation = ${{ toJSON(steps.generate-fix.outputs.explanation) }};
+
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `fix: #${issueNumber} Auto-heal ${workflowFile.split('/').pop()}`,
+              head: branchName,
+              base: 'main',
+              body: [
+                `Closes #${issueNumber}`,
+                '',
+                '## 🤖 自己修復システムによる自動PR',
+                '',
+                '### 検出された問題',
+                '',
+                `- **ワークフロー**: \`${workflowFile}\``,
+                `- **エラー**: ${{ github.event.inputs.error_description }}`,
+                '',
+                '### LLMによる分析と修正',
+                '',
+                explanation,
+                '',
+                '### レビュー観点',
+                '',
+                '- [ ] 修正内容は正しいか',
+                '- [ ] 既存の機能を壊していないか',
+                '- [ ] 他のワークフローへの影響はないか',
+                '',
+                '### マージ後の確認',
+                '',
+                '- [ ] ワークフローが正常に動作するか',
+                '- [ ] 同じエラーが再発しないか',
+                '',
+                '---',
+                '',
+                '🤖 このPRは自己修復システムによって自動生成されました。',
+                '**人間のレビューと承認が必要です。**',
+                '',
+                `Triggered by: @${context.actor}`
+              ].join('\n')
+            });
+
+            console.log(`✅ Created PR #${pr.data.number}`);
+            console.log(`URL: ${pr.data.html_url}`);
+
+            // PRにラベルを追加
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.data.number,
+              labels: ['auto-healing', 'needs-review']
+            });
+
+      - name: Update Issue with PR link
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = ${{ steps.create-issue.outputs.issue_number }};
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: [
+                '## ✅ 修正PRが作成されました',
+                '',
+                '自己修復システムがLLMを使用して修正案を生成し、PRを作成しました。',
+                '',
+                '### 次のステップ',
+                '',
+                '1. 上記のPRをレビューしてください',
+                '2. 修正内容が正しければ承認してください',
+                '3. マージしてください',
+                '',
+                '---',
+                '',
+                `🤖 Triggered by: @${context.actor}`
+              ].join('\n')
+            });

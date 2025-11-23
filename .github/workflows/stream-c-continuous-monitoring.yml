@@ -1,0 +1,154 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Continuous monitoring of workflows
+# Triggers: schedule, workflow_dispatch
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 📊 Continuous Monitoring
+
+# Continuously monitor system health and workflow status
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: read
+  issues: write
+  actions: read  # Required to read workflow run data
+
+jobs:
+  monitor-workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Monitor workflow health
+        id: monitor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+
+          echo "🔍 Checking workflow health for the past 24 hours..."
+
+          # Get all workflow runs from the past 24 hours
+          RUNS=$(gh api "/repos/${{ github.repository }}/actions/runs?created=>$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
+            --jq '.workflow_runs[] | select(.conclusion == "failure" or .conclusion == "skipped") | {workflow: .name, conclusion: .conclusion, created: .created_at}')
+
+          # Count failures and skipped runs
+          FAILURE_COUNT=$(echo "$RUNS" | jq -s '[.[] | select(.conclusion == "failure")] | length')
+          SKIPPED_COUNT=$(echo "$RUNS" | jq -s '[.[] | select(.conclusion == "skipped")] | length')
+
+          echo "failures=$FAILURE_COUNT" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED_COUNT" >> $GITHUB_OUTPUT
+
+          if [ "$FAILURE_COUNT" -gt 10 ] || [ "$SKIPPED_COUNT" -gt 20 ]; then
+            echo "⚠️  High number of failures ($FAILURE_COUNT) or skipped runs ($SKIPPED_COUNT)"
+            echo "alert=true" >> $GITHUB_OUTPUT
+          else
+            echo "✅ Workflow health looks good"
+            echo "alert=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check critical workflows
+        id: critical
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+
+          # List of critical workflows that should execute regularly
+          CRITICAL_WORKFLOWS=(
+            "wiki-update-agent.yml"
+            "auto-dod-judgment.yml"
+            "post-merge-verification.yml"
+          )
+
+          ISSUES=""
+
+          for workflow in "${CRITICAL_WORKFLOWS[@]}"; do
+            echo "🔍 Checking $workflow..."
+
+            # Get recent runs (past 7 days)
+            RECENT_RUNS=$(gh run list --workflow="$workflow" --limit 20 --json conclusion,createdAt)
+            RUN_COUNT=$(echo "$RECENT_RUNS" | jq '. | length')
+
+            if [ "$RUN_COUNT" -eq 0 ]; then
+              ISSUES="$ISSUES\n- **$workflow**: No runs in the past 7 days"
+            else
+              # Check success rate
+              SUCCESS_COUNT=$(echo "$RECENT_RUNS" | jq '[.[] | select(.conclusion == "success")] | length')
+              if [ "$SUCCESS_COUNT" -eq 0 ]; then
+                ISSUES="$ISSUES\n- **$workflow**: No successful runs (0/$RUN_COUNT succeeded)"
+              fi
+            fi
+          done
+
+          if [ -n "$ISSUES" ]; then
+            echo "critical_issues<<EOF" >> $GITHUB_OUTPUT
+            echo -e "$ISSUES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "has_critical_issues=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_critical_issues=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create monitoring report
+        if: steps.monitor.outputs.alert == 'true' || steps.critical.outputs.has_critical_issues == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failures = '${{ steps.monitor.outputs.failures }}';
+            const skipped = '${{ steps.monitor.outputs.skipped }}';
+            const criticalIssues = `${{ steps.critical.outputs.critical_issues }}`;
+
+            const body = `## 📊 System Health Monitoring Report
+
+            **Monitoring Period**: Past 24 hours
+            **Generated**: ${new Date().toISOString()}
+
+            ### Workflow Statistics
+
+            - ❌ Failed runs: ${failures}
+            - ⏭️  Skipped runs: ${skipped}
+
+            ${criticalIssues ? `### ⚠️ Critical Issues\n\n${criticalIssues}\n` : ''}
+
+            ### Recommended Actions
+
+            ${failures > 10 ? '- 🔴 High failure rate detected - investigate failing workflows\n' : ''}
+            ${skipped > 20 ? '- 🟡 High skip rate - check workflow trigger conditions\n' : ''}
+            ${criticalIssues ? '- 🔴 Critical workflows not functioning - immediate action required\n' : ''}
+
+            ### Links
+
+            - [All Workflow Runs](https://github.com/${{ github.repository }}/actions)
+            - [Failed Runs](https://github.com/${{ github.repository }}/actions?query=is%3Afailure)
+
+            ---
+
+            🤖 Auto-generated by [Continuous Monitoring](https://github.com/${{ github.repository }}/blob/main/.github/workflows/continuous-monitoring.yml)
+            `;
+
+            // Create an issue for the monitoring report
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 System Health Alert - ${new Date().toLocaleDateString()}`,
+              body: body,
+              labels: ['monitoring', 'health-check', 'automated']
+            });
+
+            console.log('✅ Created monitoring report issue');
+
+      - name: Monitoring complete
+        run: |
+          if [ "${{ steps.monitor.outputs.alert }}" = "true" ] || [ "${{ steps.critical.outputs.has_critical_issues }}" = "true" ]; then
+            echo "⚠️  Monitoring completed - issues detected"
+          else
+            echo "✅ Monitoring complete - system healthy"
+          fi

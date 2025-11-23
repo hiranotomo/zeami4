@@ -1,0 +1,268 @@
+# Event Model v1 - STREAM B: Meta-Operations
+# Purpose: Detect circular dependencies in workflows
+# Triggers: workflow_dispatch, schedule
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: ⚠️ 循環依存検出
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-circular-dependencies:
+    name: Check Issue Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Detect Circular Dependencies
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const issueNumber = issue.number;
+            const body = issue.body || '';
+
+            console.log(`Checking Issue #${issueNumber} for circular dependencies...`);
+
+            // 依存関係キーワードのパターン
+            // "depends on #123", "blocked by #456", "requires #789"
+            const dependencyPattern = /(?:depends\s+on|blocked\s+by|requires)\s+#(\d+)/gi;
+
+            // 最大探索深度（無限ループ防止）
+            const MAX_DEPTH = 10;
+
+            // 現在のIssueから依存関係を抽出
+            function extractDependencies(text) {
+              const dependencies = [];
+              let match;
+              const regex = new RegExp(dependencyPattern);
+              while ((match = regex.exec(text)) !== null) {
+                dependencies.push(parseInt(match[1]));
+              }
+              return [...new Set(dependencies)]; // 重複除去
+            }
+
+            // 依存グラフを構築（BFS）
+            async function buildDependencyGraph(startIssue) {
+              const graph = new Map(); // issueNumber -> [依存先の番号リスト]
+              const visited = new Set();
+              const queue = [startIssue];
+              let depth = 0;
+
+              while (queue.length > 0 && depth < MAX_DEPTH) {
+                const levelSize = queue.length;
+
+                for (let i = 0; i < levelSize; i++) {
+                  const currentIssue = queue.shift();
+
+                  if (visited.has(currentIssue)) {
+                    continue;
+                  }
+
+                  visited.add(currentIssue);
+
+                  try {
+                    // Issue情報を取得
+                    const { data: issueData } = await github.rest.issues.get({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: currentIssue
+                    });
+
+                    const deps = extractDependencies(issueData.body || '');
+                    graph.set(currentIssue, deps);
+
+                    console.log(`Issue #${currentIssue} depends on: [${deps.join(', ')}]`);
+
+                    // 未訪問の依存先をキューに追加
+                    for (const dep of deps) {
+                      if (!visited.has(dep)) {
+                        queue.push(dep);
+                      }
+                    }
+                  } catch (error) {
+                    console.log(`Warning: Could not fetch Issue #${currentIssue}: ${error.message}`);
+                    graph.set(currentIssue, []);
+                  }
+                }
+
+                depth++;
+              }
+
+              if (depth >= MAX_DEPTH) {
+                console.log(`Warning: Reached maximum depth (${MAX_DEPTH})`);
+              }
+
+              return graph;
+            }
+
+            // DFSで循環参照を検出
+            function detectCycle(graph, start) {
+              const visiting = new Set(); // 現在の探索パスで訪問中
+              const visited = new Set();  // 完全に探索済み
+              const path = [];            // 現在のパス
+
+              function dfs(node) {
+                if (visiting.has(node)) {
+                  // 循環検出！
+                  const cycleStart = path.indexOf(node);
+                  const cycle = [...path.slice(cycleStart), node];
+                  return cycle;
+                }
+
+                if (visited.has(node)) {
+                  return null; // 既に探索済み、循環なし
+                }
+
+                visiting.add(node);
+                path.push(node);
+
+                const dependencies = graph.get(node) || [];
+                for (const dep of dependencies) {
+                  const cycle = dfs(dep);
+                  if (cycle) {
+                    return cycle;
+                  }
+                }
+
+                visiting.delete(node);
+                visited.add(node);
+                path.pop();
+
+                return null;
+              }
+
+              return dfs(start);
+            }
+
+            // メイン処理
+            const currentDependencies = extractDependencies(body);
+
+            if (currentDependencies.length === 0) {
+              console.log('No dependencies found in this issue.');
+              return;
+            }
+
+            console.log(`Found ${currentDependencies.length} dependencies: [${currentDependencies.join(', ')}]`);
+
+            // 依存グラフを構築
+            console.log('Building dependency graph...');
+            const graph = await buildDependencyGraph(issueNumber);
+
+            console.log('Dependency graph:');
+            for (const [issue, deps] of graph.entries()) {
+              console.log(`  #${issue} -> [${deps.join(', ')}]`);
+            }
+
+            // 循環検出
+            console.log('Detecting cycles...');
+            const cycle = detectCycle(graph, issueNumber);
+
+            if (cycle) {
+              console.log('❌ Circular dependency detected!');
+              console.log('Cycle path:', cycle.map(n => `#${n}`).join(' -> '));
+
+              // 循環パスを視覚化
+              const cyclePath = cycle.map(n => `#${n}`).join(' → ');
+
+              // 警告コメントを投稿
+              const warningMessage = [
+                '## ⚠️ 循環依存が検出されました',
+                '',
+                '**循環パス:**',
+                `\`${cyclePath}\``,
+                '',
+                '### 問題',
+                'このIssueは他のIssueと循環依存関係にあります。これにより以下の問題が発生する可能性があります:',
+                '- どのIssueも完了できない状態（デッドロック）',
+                '- 依存関係の追跡が困難',
+                '- 作業の優先順位付けが不明確',
+                '',
+                '### 解決方法',
+                '1. **依存関係を見直す**: 循環を断ち切るために、依存関係を削除または再構成してください',
+                '2. **Issueを分割する**: より小さな独立したタスクに分割することを検討してください',
+                '3. **依存の方向を変える**: 本当にどちらが先に完了すべきか再検討してください',
+                '',
+                '### 対応',
+                '循環依存を解消するまで、このIssueには `circular-dependency` ラベルが付与されます。'
+              ].join('\n');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: warningMessage
+              });
+
+              // circular-dependency ラベルを追加
+              try {
+                // ラベルが存在しない場合は作成
+                try {
+                  await github.rest.issues.getLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: 'circular-dependency'
+                  });
+                } catch (error) {
+                  if (error.status === 404) {
+                    console.log('Creating circular-dependency label...');
+                    await github.rest.issues.createLabel({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      name: 'circular-dependency',
+                      color: 'd73a4a',
+                      description: 'Issue has circular dependencies with other issues'
+                    });
+                  }
+                }
+
+                // ラベルを追加
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  labels: ['circular-dependency']
+                });
+
+                console.log('Added circular-dependency label');
+              } catch (error) {
+                console.log(`Warning: Could not add label: ${error.message}`);
+              }
+
+              // ワークフローを失敗させる
+              core.setFailed(`Circular dependency detected: ${cyclePath}`);
+
+            } else {
+              console.log('✅ No circular dependencies detected');
+
+              // 循環依存ラベルが付いていれば削除
+              const labels = issue.labels.map(l => l.name);
+              if (labels.includes('circular-dependency')) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issueNumber,
+                    name: 'circular-dependency'
+                  });
+                  console.log('Removed circular-dependency label');
+
+                  // 解消コメント
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issueNumber,
+                    body: '✅ 循環依存が解消されました。`circular-dependency` ラベルを削除しました。'
+                  });
+                } catch (error) {
+                  console.log(`Note: Could not remove label: ${error.message}`);
+                }
+              }
+            }

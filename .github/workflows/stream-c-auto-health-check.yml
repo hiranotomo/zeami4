@@ -1,0 +1,91 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Automated health checks
+# Triggers: schedule (every 6h)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🏥 Auto Health Check v2
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check critical workflows health
+        id: health
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          echo "🏥 Checking critical workflows..."
+
+          CRITICAL_WORKFLOWS=(
+            "wiki-update-agent.yml"
+            "auto-dod-judgment.yml"
+            "post-merge-verification.yml"
+            "continuous-monitoring.yml"
+          )
+
+          BROKEN_WORKFLOWS=""
+
+          for workflow in "${CRITICAL_WORKFLOWS[@]}"; do
+            echo "Checking: $workflow"
+            RUNS=$(gh run list --workflow="$workflow" --limit 10 --json conclusion 2>/dev/null || echo "[]")
+
+            if [ "$RUNS" = "[]" ]; then
+              echo "  ⚠️  No runs found"
+              continue
+            fi
+
+            TOTAL=$(echo "$RUNS" | jq 'length')
+            FAILURES=$(echo "$RUNS" | jq '[.[] | select(.conclusion == "failure")] | length')
+
+            if [ "$TOTAL" -eq 0 ]; then
+              continue
+            fi
+
+            FAILURE_RATE=$((FAILURES * 100 / TOTAL))
+
+            if [ "$FAILURE_RATE" -gt 50 ]; then
+              echo "  🚨 CRITICAL: $FAILURE_RATE% failure rate"
+              BROKEN_WORKFLOWS="${BROKEN_WORKFLOWS}${workflow},"
+            else
+              echo "  ✅ Healthy ($FAILURE_RATE% failure rate)"
+            fi
+          done
+
+          if [ -n "$BROKEN_WORKFLOWS" ]; then
+            echo "broken_workflows=$BROKEN_WORKFLOWS" >> $GITHUB_OUTPUT
+            echo "needs_fix=true" >> $GITHUB_OUTPUT
+          else
+            echo "✅ All workflows healthy"
+            echo "needs_fix=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Report issues
+        if: steps.health.outputs.needs_fix == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const workflows = '${{ steps.health.outputs.broken_workflows }}';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Critical Workflows Failing',
+              body: `Broken workflows detected:\n\n${workflows}`,
+              labels: ['health-check', 'urgent']
+            });

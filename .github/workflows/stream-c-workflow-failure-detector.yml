@@ -1,0 +1,183 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Detect workflow failures
+# Triggers: schedule (every 6h)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🚨 ワークフロー障害検知
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # 6時間ごとに定期チェック
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+  pull-requests: write
+
+jobs:
+  detect-failures:
+    name: Detect Workflow Failures
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Fetch recent workflow failures
+        id: detect
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // 過去100件のワークフロー実行を分析
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+
+            const failureStats = {};
+
+            // 失敗率を計算
+            for (const run of runs.data.workflow_runs) {
+              const name = run.name;
+              if (!failureStats[name]) {
+                failureStats[name] = { total: 0, failed: 0, lastFailureId: null };
+              }
+              failureStats[name].total++;
+              if (run.conclusion === 'failure') {
+                failureStats[name].failed++;
+                failureStats[name].lastFailureId = run.id;
+              }
+            }
+
+            // 高頻度失敗ワークフローを検出
+            const criticalFailures = [];
+            for (const [name, stats] of Object.entries(failureStats)) {
+              const failureRate = stats.failed / stats.total;
+              if (failureRate >= 0.9 && stats.failed >= 5) {
+                criticalFailures.push({ name, ...stats, failureRate });
+              }
+            }
+
+            console.log(`\n📊 Workflow Failure Analysis:`);
+            console.log(`Total workflows analyzed: ${Object.keys(failureStats).length}`);
+            console.log(`Critical failures detected: ${criticalFailures.length}\n`);
+
+            // 各失敗ワークフローのIssueを作成
+            for (const failure of criticalFailures) {
+              console.log(`\n🔍 Processing: ${failure.name}`);
+              console.log(`   Failure rate: ${(failure.failureRate * 100).toFixed(1)}%`);
+              console.log(`   Failed/Total: ${failure.failed}/${failure.total}`);
+
+              // 既存のIssueをチェック
+              const existing = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: 'workflow-bug',
+                state: 'open'
+              });
+
+              const alreadyReported = existing.data.some(issue =>
+                issue.title.includes(failure.name)
+              );
+
+              if (alreadyReported) {
+                console.log(`   ⏭️  Issue already exists, skipping...`);
+                continue;
+              }
+
+              // エラーログを取得
+              const jobs = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: failure.lastFailureId
+              });
+
+              const failedJob = jobs.data.jobs.find(j => j.conclusion === 'failure');
+              const errorLog = failedJob ? `Run: ${failure.lastFailureId}\nJob: ${failedJob.name}` : '';
+
+              // False Positive検出：インフラエラーかどうかチェック
+              const isInfrastructureError = (logText) => {
+                const infraErrors = [
+                  'Repository not found',
+                  'API rate limit',
+                  'timeout',
+                  'network error',
+                  'connection reset',
+                  'ECONNRESET',
+                  'ETIMEDOUT',
+                  'Service Unavailable'
+                ];
+                return infraErrors.some(e => logText.toLowerCase().includes(e.toLowerCase()));
+              };
+
+              if (isInfrastructureError(errorLog)) {
+                console.log(`   ⏭️  Infrastructure error detected (false positive), skipping...`);
+                continue;
+              }
+
+              // Issueを作成（テンプレート形式）
+              const severityLabel = failure.failureRate === 1 ? 'Critical (100% failure rate)' :
+                                   failure.failureRate > 0.8 ? 'High (>80% failure rate)' :
+                                   failure.failureRate > 0.5 ? 'Medium (50-80% failure rate)' :
+                                   'Low (<50% failure rate)';
+
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🤖 Workflow Bug: ${failure.name} (${(failure.failureRate * 100).toFixed(0)}% failure rate)`,
+                body: [
+                  '## 🚨 自動検出: ワークフロー異常',
+                  '',
+                  'このIssueはworkflow-failure-detectorにより自動作成されました。',
+                  '',
+                  '### 自動修復プロセス',
+                  '',
+                  '1. ✅ **自動検出**: workflow-failure-detectorが失敗を検出',
+                  '2. ✅ **Issue作成**: このIssueが自動作成される',
+                  '3. 🔄 **自動修復**: Claude Code Actionが起動して修正PRを作成',
+                  '4. ⏳ **レビュー**: 人間がPRをレビュー・マージ',
+                  '',
+                  '---',
+                  '',
+                  '### ワークフロー名',
+                  `\`${failure.name}\``,
+                  '',
+                  '### 失敗率',
+                  `${(failure.failureRate * 100).toFixed(1)}% (${failure.failed}/${failure.total})`,
+                  '',
+                  '### 失敗Run URL',
+                  `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${failure.lastFailureId}`,
+                  '',
+                  '### エラーログ',
+                  '```',
+                  errorLog || 'No error log available',
+                  '```',
+                  '',
+                  '### エラータイプ（推定）',
+                  'Unknown',
+                  '',
+                  '### 深刻度',
+                  severityLabel,
+                  '',
+                  '### 自動修復オプション',
+                  '- [x] Claude Code Actionで自動修復を試行',
+                  '- [ ] False Positive（インフラエラー）の可能性をチェック',
+                  '- [ ] 人間のレビューを待つ',
+                  '',
+                  '---',
+                  '',
+                  '🤖 Auto-created by Workflow Failure Detector'
+                ].join('\n'),
+                labels: ['workflow-bug', 'auto-healing', 'needs-review']
+              });
+
+              console.log(`   ✅ Created issue #${issue.data.number}: ${issue.data.title}`);
+            }
+
+            if (criticalFailures.length === 0) {
+              console.log('\n✅ No critical workflow failures detected!');
+              console.log('::notice title=✅ 対応不要: ワークフロー障害検知成功::異常なワークフローは検出されませんでした');
+            } else {
+              console.log(`::error title=🔴 対応必要: ワークフロー障害検知::${criticalFailures.length}件の異常なワークフローを検出しました`);
+            }

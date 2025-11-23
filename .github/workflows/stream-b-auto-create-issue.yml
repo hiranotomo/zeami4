@@ -1,0 +1,173 @@
+# Event Model v1 - STREAM B: Meta-Operations
+# Purpose: Auto-create issue for branches
+# Triggers: workflow_dispatch
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: ℹ️ 自動Issue作成
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_type:
+        description: 'Type of issue to create'
+        required: true
+        type: choice
+        options:
+          - bug
+          - feature
+          - documentation
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  auto-create-issue:
+    name: Auto Create Issue for Branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check if branch has issue number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // PRの場合はhead_ref、pushの場合はref_name
+            const branch = context.payload.pull_request
+              ? context.payload.pull_request.head.ref
+              : context.ref.replace('refs/heads/', '');
+
+            console.log(`Checking branch: ${branch}`);
+
+            // Issue番号があるかチェック (Work Unit System対応)
+            const hasIssueNumber = /^(feature|hotfix|docs|test|fix)\/\d+-/.test(branch);
+
+            if (hasIssueNumber) {
+              console.log('✅ Branch already has issue number');
+              return;
+            }
+
+            console.log('⚠️  Branch does not have issue number, auto-creating issue...');
+
+            // ブランチ名から説明を抽出
+            const description = branch
+              .replace(/^(feature|hotfix|docs|test|fix)\//, '')
+              .replace(/-/g, ' ')
+              .trim();
+
+            const branchType = branch.match(/^(\w+)\//)?.[1] || 'feature';
+
+            // 自動Issue作成（まずissue.numberなしで作成）
+            const { data: issue } = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🤖 Auto: ${description}`,
+              body: '作成中...',  // 一時的な内容
+              labels: ['auto-created', 'needs-review']
+            });
+
+            // Issue番号が利用可能になったので、本文を更新
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: [
+                '## 🤖 自動作成されたIssue',
+                '',
+                `このIssueは、Issue番号なしのブランチ \`${branch}\` に対して自動的に作成されました。`,
+                '',
+                '### ブランチ情報',
+                `- **ブランチ名**: \`${branch}\``,
+                `- **タイプ**: ${branchType}`,
+                `- **作成理由**: Issue番号が含まれていないため`,
+                '',
+                '### 次のステップ',
+                '',
+                '#### 推奨: ブランチを正しい形式で作り直す',
+                '',
+                '```bash',
+                `git checkout -b ${branchType}/${issue.number}-${description.replace(/ /g, '-')}`,
+                'git cherry-pick {現在のコミット}',
+                `git push -u origin ${branchType}/${issue.number}-${description.replace(/ /g, '-')}`,
+                '```',
+                '',
+                '#### または: このIssueをそのまま使用',
+                '',
+                'このIssue番号をブランチ名やコミットメッセージに追加してください:',
+                '',
+                '```bash',
+                `# コミットメッセージの例`,
+                `git commit -m "feat: #${issue.number} ${description}"`,
+                '```',
+                '',
+                '### なぜこれが必要？',
+                '',
+                '- Issue-PR-Closeサイクルの完全性を保証',
+                '- 変更の追跡可能性を確保',
+                '- LLMとガードレールシステムの連携',
+                '',
+                '### 参考',
+                '',
+                '- [AI駆動ブランチ戦略](../docs/AI_DRIVEN_BRANCHING.md)',
+                '- [コントリビューションガイド](../docs/CONTRIBUTING.md)',
+                '',
+                '---',
+                '',
+                '🤖 このIssueはガードレールシステムによって自動生成されました。',
+                '',
+                `Created by: ${context.actor}`,
+                `Branch: ${branch}`,
+                `Commit: ${context.sha.substring(0, 7)}`
+              ].join('\n')
+            });
+
+            console.log(`✅ Created issue #${issue.number}: ${issue.title}`);
+
+            // PRの場合、コメントを追加
+            if (context.payload.pull_request) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body: [
+                  `## 🤖 Issue番号が自動作成されました`,
+                  '',
+                  `このPRのブランチ \`${branch}\` にはIssue番号が含まれていなかったため、`,
+                  `自動的に **Issue #${issue.number}** を作成しました。`,
+                  '',
+                  '### 推奨される対応',
+                  '',
+                  '1. **PRタイトルを更新**:',
+                  `   - 現在: ${context.payload.pull_request.title}`,
+                  `   - 推奨: \`feat: #${issue.number} ${description}\``,
+                  '',
+                  '2. **PR本文を更新**:',
+                  `   - \`Closes #${issue.number}\` を追加`,
+                  '',
+                  '3. **または、ブランチを作り直す** (推奨):',
+                  '   ```bash',
+                  `   git checkout -b ${branchType}/${issue.number}-${description.replace(/ /g, '-')}`,
+                  '   git cherry-pick {現在のコミット}',
+                  `   git push -u origin ${branchType}/${issue.number}-${description.replace(/ /g, '-')}`,
+                  '   ```',
+                  '',
+                  '### 作成されたIssue',
+                  '',
+                  `- **Issue**: #${issue.number}`,
+                  `- **タイトル**: ${issue.title}`,
+                  `- **URL**: ${issue.html_url}`,
+                  '',
+                  '---',
+                  '',
+                  '💡 今後は、ブランチ作成前に必ずIssueを作成するか、',
+                  `正しい形式（\`${branchType}/#{Issue番号}-{説明}\`）でブランチを作成してください。`
+                ].join('\n')
+              });
+            }
+
+            // pushの場合、成功メッセージ（PRコメント不可のため）
+            console.log('');
+            console.log('📧 Push detected, issue created but cannot comment on PR (no PR exists yet)');
+            console.log(`Please reference issue #${issue.number} in your commits and PR`);

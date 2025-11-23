@@ -1,0 +1,64 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Claude AI integration for self-healing
+# Triggers: workflow_dispatch, issue_comment
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🤖 Claude Code自動修復
+
+on:
+  issue_comment:
+    types: [created]
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+jobs:
+  claude:
+    # Trigger when:
+    # 1. @claude is mentioned in issue/PR comment
+    # 2. workflow-bug or auto-healing label is added to an issue
+    # 3. Issue is opened with workflow-bug or auto-healing label (workflow-failure-detector)
+    # 4. merge-conflict label is added to a PR (conflict-detector)
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'issues' && github.event.action == 'labeled' && (github.event.label.name == 'workflow-bug' || github.event.label.name == 'auto-healing')) ||
+      (github.event_name == 'issues' && github.event.action == 'opened' && (contains(toJSON(github.event.issue.labels), '"name":"auto-healing"') || contains(toJSON(github.event.issue.labels), '"name":"workflow-bug"'))) ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'merge-conflict')
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better context
+
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          # OAuth token from /install-github-app
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # IMPORTANT: label_trigger only supports a single label
+          # Multiple labels are handled by the 'if' condition above
+          # Pass the actual label name dynamically
+          label_trigger: ${{ github.event.label.name || 'claude' }}
+
+          # Enable all tools for full auto-healing capability
+          # Read/Write/Edit needed to fix code
+          # Bash needed for git operations and PR creation
+          claude_args: |
+            --max-turns 30
+            --model claude-sonnet-4-5-20250929
+            --allowedTools Edit,MultiEdit,Glob,Grep,LS,Read,Write,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git rm:*),Bash(git checkout:*),Bash(git fetch:*),Bash(git merge:*),Bash(git show:*),Bash(git branch:*)

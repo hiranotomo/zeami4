@@ -1,0 +1,186 @@
+# Event Model v1 - STREAM A: PR-Lifecycle
+# Purpose: Validate commit message format
+# Triggers: pull_request
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: Validate Commit Message
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  validate-commit-message:
+    name: Check Commit Message Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Handle checkout failure
+        if: steps.checkout.outcome == 'failure'
+        run: |
+          echo "⚠️ Checkout failed - likely infrastructure error (Repository not found, API timeout, etc.)"
+          echo "Skipping validation to avoid false positive workflow failures"
+          echo "This is expected behavior during temporary GitHub API outages"
+
+      - name: Validate commit messages
+        if: steps.checkout.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+
+            // Infrastructure error detection helper
+            const isInfraError = (error) => {
+              const infraPatterns = [
+                'Repository not found',
+                'API rate limit',
+                'timeout',
+                'ECONNRESET',
+                'ETIMEDOUT'
+              ];
+              const errorMsg = error?.message || error?.toString() || '';
+              return infraPatterns.some(p => errorMsg.includes(p));
+            };
+
+            // PR の場合は base...head の範囲、push の場合は最新1コミット
+            let commits = [];
+
+            try {
+              if (context.payload.pull_request) {
+                // PRの全コミットをチェック
+                const { data: prCommits } = await github.rest.pulls.listCommits({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.payload.pull_request.number
+                });
+                commits = prCommits.map(c => ({
+                  sha: c.sha.substring(0, 7),
+                  message: c.commit.message
+                }));
+              } else {
+                // 直接pushの場合は最新コミットのみ
+                const sha = context.sha;
+                const message = execSync(`git log -1 --pretty=%B ${sha}`, { encoding: 'utf8' });
+                commits = [{ sha: sha.substring(0, 7), message }];
+              }
+            } catch (error) {
+              if (isInfraError(error)) {
+                console.log('⚠️ Infrastructure error detected - skipping validation');
+                console.log(`Error: ${error.message}`);
+                return;  // Skip validation, don't fail
+              }
+              throw error;  // Re-throw if not infrastructure error
+            }
+
+            console.log(`Checking ${commits.length} commit(s)...`);
+
+            // Issue番号パターン: #数字
+            const issuePattern = /#\d+/;
+
+            const invalidCommits = [];
+
+            for (const commit of commits) {
+              console.log(`\nCommit ${commit.sha}:`);
+              console.log(commit.message);
+
+              // マージコミット解決時のコミットはスキップ
+              if (commit.message.includes('Merge') ||
+                  commit.message.includes('Resolve merge conflict')) {
+                console.log('⏭️ Skipping merge-related commit');
+                continue;
+              }
+
+              if (!issuePattern.test(commit.message)) {
+                invalidCommits.push(commit);
+                console.log(`❌ No issue reference found`);
+              } else {
+                const issueNumber = commit.message.match(issuePattern)[0];
+                console.log(`✅ Issue reference found: ${issueNumber}`);
+              }
+            }
+
+            if (invalidCommits.length > 0) {
+              const errorMessage = [
+                `## ❌ コミットメッセージにIssue番号がありません`,
+                '',
+                `以下の${invalidCommits.length}件のコミットにIssue参照が含まれていません:`,
+                '',
+                invalidCommits.map(c => `- \`${c.sha}\`: ${c.message.split('\n')[0]}`).join('\n'),
+                '',
+                '### 正しい形式:',
+                '```',
+                'fix: #95 説明',
+                'feat: #97 説明',
+                'docs: #100 説明',
+                '```',
+                '',
+                '### なぜ必要？',
+                '- コミットとIssueの紐付けを保証',
+                '- 変更理由の追跡可能性を確保',
+                '- LLMがIssue参照を忘れることを防止',
+                '',
+                '### 修正方法:',
+                '',
+                '#### 方法1: コミットメッセージを修正（推奨）',
+                '```bash',
+                'git commit --amend -m "fix: #Issue番号 説明"',
+                'git push --force-with-lease',
+                '```',
+                '',
+                '#### 方法2: 新しいコミットを追加',
+                '```bash',
+                'git commit --allow-empty -m "fix: #Issue番号 前のコミットにIssue参照追加"',
+                'git push',
+                '```',
+                '',
+                '### 例外:',
+                'マージコミット（"Merge pull request"）は自動的にスキップされます。'
+              ].join('\n');
+
+              // PRの場合はコメントを投稿
+              if (context.payload.pull_request?.number) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  body: errorMessage
+                });
+              }
+
+              core.setFailed(`::error title=🔴 対応必要: コミットメッセージ検証失敗::${invalidCommits.length}件のコミットにIssue番号がありません`);
+              core.setFailed(`${invalidCommits.length}件のコミットにIssue番号がありません`);
+            } else {
+              console.log(`\n✅ All commits have issue references`);
+              console.log(`::notice title=✅ 対応不要: コミットメッセージ検証成功::全${commits.length}件のコミットにIssue参照があります`);
+
+              // PRの場合、成功メッセージを投稿
+              if (context.payload.pull_request?.number) {
+                const issueNumbers = commits
+                  .map(c => c.message.match(issuePattern))
+                  .filter(Boolean)
+                  .map(m => m[0]);
+
+                const uniqueIssues = [...new Set(issueNumbers)];
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  body: `✅ 全${commits.length}件のコミットにIssue参照があります (関連Issue: ${uniqueIssues.join(', ')})`
+                });
+              }
+            }

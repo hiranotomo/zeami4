@@ -1,0 +1,170 @@
+# Event Model v1 - STREAM A: PR-Lifecycle
+# Purpose: Detect merge conflicts in PR
+# Triggers: pull_request
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🔍 マージコンフリクト検出
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  detect-conflict:
+    name: Detect Merge Conflicts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Skip on push events (workflow only designed for pull_request context)
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Check PR merge status
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            console.log(`PR #${context.issue.number} mergeable status: ${pr.mergeable}`);
+            console.log(`Mergeable state: ${pr.mergeable_state}`);
+
+            const hasConflict = pr.mergeable === false;
+            core.setOutput('has_conflict', hasConflict);
+            core.setOutput('mergeable_state', pr.mergeable_state);
+
+            return hasConflict;
+
+      - name: Add merge-conflict label
+        if: steps.check.outputs.has_conflict == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Check if label already exists
+            const labels = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const hasLabel = labels.data.some(label => label.name === 'merge-conflict');
+
+            if (!hasLabel) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ['merge-conflict']
+              });
+
+              console.log('Added merge-conflict label');
+            } else {
+              console.log('Label already exists');
+            }
+
+      - name: Comment on PR
+        if: steps.check.outputs.has_conflict == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Check if we already commented
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const botComment = comments.data.find(comment =>
+              comment.user.login === 'github-actions[bot]' &&
+              comment.body.includes('🔴 マージコンフリクト検出')
+            );
+
+            if (botComment) {
+              console.log('Conflict comment already exists, skipping');
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## 🔴 マージコンフリクト検出
+
+このPRは \`main\` ブランチとコンフリクトしています。
+
+### 🔧 自動解決を試行
+
+自動修復システムが起動し、コンフリクト解決を試みます。
+
+### 📋 次のステップ
+
+1. **自動解決**: Claude Code Actionが起動してコンフリクトを解決します
+2. **確認待ち**: 解決後、変更内容をレビューしてください
+3. **手動解決**: 複雑なコンフリクトの場合は手動解決が必要です
+
+### 🤖 手動で解決する場合
+
+\`\`\`bash
+# ブランチをチェックアウト
+git checkout ${context.payload.pull_request.head.ref}
+
+# mainブランチを取得
+git fetch origin main
+
+# mainをマージ
+git merge origin/main
+
+# コンフリクトを解決後
+git add .
+git commit -m "fix: Resolve merge conflict with main"
+git push
+\`\`\`
+
+---
+🤖 Auto-detected by Conflict Detector`
+            });
+
+      - name: Remove merge-conflict label if resolved
+        if: steps.check.outputs.has_conflict == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: 'merge-conflict'
+              });
+              console.log('Removed merge-conflict label (conflict resolved)');
+            } catch (error) {
+              if (error.status === 404) {
+                console.log('Label does not exist, nothing to remove');
+              } else {
+                throw error;
+              }
+            }
+
+      - name: Summary
+        run: |
+          echo "🔍 Conflict Detection Summary"
+          echo "=============================="
+          echo "PR: #${{ github.event.pull_request.number }}"
+          echo "Has conflict: ${{ steps.check.outputs.has_conflict }}"
+          echo "Mergeable state: ${{ steps.check.outputs.mergeable_state }}"
+          echo ""
+
+          if [ "${{ steps.check.outputs.has_conflict }}" == "true" ]; then
+            echo "❌ Merge conflict detected - Auto-healing triggered"
+          else
+            echo "✅ No merge conflicts"
+          fi

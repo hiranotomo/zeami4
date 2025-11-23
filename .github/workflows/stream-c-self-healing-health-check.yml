@@ -1,0 +1,213 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Health check for self-healing system
+# Triggers: schedule, workflow_dispatch
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🏥 自動修復システム ヘルスチェック
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # 6時間ごと
+  workflow_dispatch:  # 手動実行も可能
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check if repository has recent activity
+        id: activity
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // 過去24時間のIssue/PR作成をチェック
+            const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              since,
+              state: 'all'
+            });
+
+            const hasActivity = issues.data.length > 0;
+            console.log(`📊 Recent activity (past 24h): ${issues.data.length} issues/PRs`);
+            console.log(`Has activity: ${hasActivity}`);
+            core.setOutput('has_activity', hasActivity);
+
+            return hasActivity;
+
+      - name: Skip if no recent activity
+        if: steps.activity.outputs.has_activity != 'true'
+        run: |
+          echo "⏭️  No recent activity in the past 24 hours"
+          echo "Skipping health check to save resources"
+          exit 0
+
+      - name: Check Claude Code Action health
+        if: steps.activity.outputs.has_activity == 'true'
+        id: claude_check
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PAT_FOR_HEALTH_CHECK }}
+          script: |
+            console.log('🏥 Starting Claude Code Action health check...');
+
+            // workflow-bugラベルで軽量テストIssueを作成
+            const testIssue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🏥 Health Check: Auto-Healing System Test',
+              body: [
+                '## 🏥 ヘルスチェック',
+                '',
+                'これは自動修復システムのヘルスチェック用テストIssueです。',
+                '',
+                '### 期待される動作',
+                '- claude.ymlが起動',
+                '- Claude Code Actionが応答',
+                '- このIssueに分析コメントが付く',
+                '',
+                '✅ 応答があればヘルスチェック成功',
+                '',
+                '⏱️ 60秒後に自動確認します',
+                '',
+                '---',
+                '🤖 Automated health check - ' + new Date().toISOString()
+              ].join('\n'),
+              labels: ['workflow-bug', 'health-check']
+            });
+
+            console.log(`✅ Created test issue #${testIssue.data.number}`);
+            core.setOutput('test_issue', testIssue.data.number);
+
+            // 60秒待機してClaude応答を確認
+            console.log('⏱️  Waiting 60 seconds for Claude response...');
+            await new Promise(resolve => setTimeout(resolve, 60000));
+
+            // コメントをチェック
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: testIssue.data.number
+            });
+
+            const claudeResponse = comments.data.some(c =>
+              c.user.login === 'claude[bot]' ||
+              c.user.login === 'claude'
+            );
+
+            if (claudeResponse) {
+              console.log('✅ Claude Code Action is HEALTHY');
+
+              // テストIssueをクローズ
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: testIssue.data.number,
+                state: 'closed'
+              });
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: testIssue.data.number,
+                body: '✅ **Health check PASSED** - Claude Code Action is operational\n\n🤖 Auto-closed by health check'
+              });
+
+              core.setOutput('status', 'healthy');
+              return true;
+            } else {
+              console.log('❌ Claude Code Action did NOT respond');
+              core.setOutput('status', 'unhealthy');
+              return false;
+            }
+
+      - name: Create alert if unhealthy
+        if: steps.claude_check.outputs.status == 'unhealthy'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PAT_FOR_HEALTH_CHECK }}
+          script: |
+            const testIssueNumber = ${{ steps.claude_check.outputs.test_issue }};
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 ALERT: Self-Healing System Health Check Failed',
+              body: [
+                '## 🚨 ヘルスチェック失敗',
+                '',
+                'Claude Code Actionが応答しませんでした。',
+                '',
+                `テストIssue: #${testIssueNumber}`,
+                `実行時刻: ${new Date().toISOString()}`,
+                '',
+                '### 確認事項',
+                '- [ ] claude.ymlの設定を確認',
+                '- [ ] CLAUDE_CODE_OAUTH_TOKENの有効性を確認',
+                '- [ ] GitHub Actionsのログを確認',
+                '- [ ] Claude Code Actionのステータスを確認',
+                '',
+                '### 調査手順',
+                '1. claude.ymlの最近の実行ログを確認',
+                '2. workflow-bugラベルのトリガーが動作しているか確認',
+                '3. 必要に応じて手動でテスト実行',
+                '',
+                '---',
+                '🚨 Automated alert from health check',
+                `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+              ].join('\n'),
+              labels: ['bug', 'urgent', 'auto-healing']
+            });
+
+      - name: Check workflow-failure-detector health
+        if: steps.activity.outputs.has_activity == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log('🏥 Checking workflow-failure-detector health...');
+
+            // 最終実行を確認
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'workflow-failure-detector.yml',
+              per_page: 1
+            });
+
+            if (runs.data.workflow_runs.length === 0) {
+              console.log('⚠️  workflow-failure-detector has never run');
+              return;
+            }
+
+            const lastRun = runs.data.workflow_runs[0];
+            const lastRunTime = new Date(lastRun.created_at);
+            const hoursSinceLastRun = (Date.now() - lastRunTime.getTime()) / (1000 * 60 * 60);
+
+            console.log(`Last run: ${hoursSinceLastRun.toFixed(1)} hours ago`);
+            console.log(`Status: ${lastRun.conclusion}`);
+
+            if (hoursSinceLastRun > 7) {
+              console.log('⚠️  workflow-failure-detector has not run in over 7 hours (expected: every 6 hours)');
+            } else {
+              console.log('✅ workflow-failure-detector is healthy');
+            }
+
+      - name: Summary
+        if: steps.activity.outputs.has_activity == 'true'
+        run: |
+          echo "🏥 Health Check Summary"
+          echo "======================"
+          echo "Claude Code Action: ${{ steps.claude_check.outputs.status || 'not checked' }}"
+          echo "Test Issue: #${{ steps.claude_check.outputs.test_issue || 'N/A' }}"
+          echo ""
+          echo "✅ Health check complete"

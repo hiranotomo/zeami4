@@ -1,0 +1,141 @@
+# Event Model v1 - STREAM B: Meta-Operations
+# Purpose: Update wiki after PR merge
+# Triggers: pull_request_target (merged)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 📚 Wiki Update Agent
+
+# Trigger: PR merged into main
+# Using pull_request_target to ensure we use the workflow from main branch
+on:
+  pull_request_target:
+    types: [closed]
+    branches:
+      - main
+
+# Minimum privilege principle
+permissions:
+  contents: write      # Wiki clone/push
+  pull-requests: write # PR comment
+  issues: write        # Issue creation on error
+  id-token: write      # Required for Claude Code action OIDC authentication
+
+jobs:
+  wiki-update:
+    # Security: Only run if PR was merged AND from same repository (not forks)
+    if: |
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository (main branch)
+        uses: actions/checkout@v4
+        with:
+          ref: main       # Explicitly checkout main branch
+          fetch-depth: 0  # Full history for better context
+
+      - name: Install Claude Code manually
+        run: |
+          echo "Installing Claude Code manually to avoid race condition..."
+          # Download and install with explicit version
+          curl -fsSL https://claude.ai/install.sh | bash -s -- 2.0.50
+
+          # Add to PATH
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          # Verify installation
+          export PATH="$HOME/.local/bin:$PATH"
+          if command -v claude &> /dev/null; then
+            claude --version
+            echo "✅ Claude Code installed successfully"
+          else
+            echo "❌ Claude Code installation failed - executable not found"
+            exit 1
+          fi
+
+      - name: Run Wiki Update Agent
+        id: wiki-update
+        uses: anthropics/claude-code-action@v1
+        with:
+          # GitHub API access (Wiki clone/push, PR comments)
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Claude API access (LLM execution)
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Use manually installed Claude Code to avoid race condition
+          # Note: GitHub Actions runs on ubuntu, HOME is /home/runner
+          path_to_claude_code_executable: /home/runner/.local/bin/claude
+
+          # Provide prompt directly as input
+          prompt: |
+            @wiki-update-agent
+
+            PR #${{ github.event.pull_request.number }} has been merged.
+
+            ## Your Task
+
+            Please follow the wiki-update-agent guidelines defined in `.claude/agents/wiki-update-agent.md`.
+
+            ### Step-by-step process:
+            1. Read the Wiki editing guidelines (if they exist in the Wiki repository)
+            2. Analyze this PR content:
+               - Use `gh pr view ${{ github.event.pull_request.number }} --json title,body,labels,files`
+               - Use `gh pr diff ${{ github.event.pull_request.number }}`
+            3. Determine Wiki update necessity based on guidelines and change type
+            4. If update needed:
+               - Create new Wiki page OR update existing page
+               - Follow Wiki naming conventions and format
+               - Post comment on PR #${{ github.event.pull_request.number }} with Wiki URL and summary
+            5. If update NOT needed:
+               - Post comment on PR #${{ github.event.pull_request.number }} explaining skip reason
+
+            ## PR Information (Quick Reference)
+            - **Title**: ${{ github.event.pull_request.title }}
+            - **Number**: #${{ github.event.pull_request.number }}
+            - **Labels**: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+            - **Files Changed**: ${{ github.event.pull_request.changed_files }}
+            - **Additions**: +${{ github.event.pull_request.additions }} lines
+            - **Deletions**: -${{ github.event.pull_request.deletions }} lines
+
+            ## Priority: Token Optimization
+            - Skip minor changes (docs typos, formatting) without detailed analysis
+            - Only update Wiki when truly necessary
+            - Be concise in PR comments
+
+            Please proceed with the Wiki update decision.
+
+          claude_args: |
+            --max-turns 20
+            --model claude-sonnet-4-5-20250929
+            --allowedTools Read,Write,Bash(gh:*),Bash(git clone:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git config:*)
+
+      - name: Handle failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const prTitle = context.payload.pull_request.title;
+
+            // Comment on PR about failure
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: [
+                '⚠️ Wiki Update Agent encountered an error',
+                '',
+                'The automated Wiki update process failed. This might require manual intervention.',
+                '',
+                `**PR**: #${prNumber} - ${prTitle}`,
+                `**Workflow Run**: ${context.payload.repository.html_url}/actions/runs/${context.runId}`,
+                '',
+                'Please check the workflow logs for details.',
+                '',
+                '🤖 Generated by Wiki Update Agent'
+              ].join('\n')
+            });
+
+            console.log('Error notification posted to PR #' + prNumber);

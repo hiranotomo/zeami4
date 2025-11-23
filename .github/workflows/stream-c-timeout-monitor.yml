@@ -1,0 +1,258 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Monitor workflow timeouts
+# Triggers: schedule, workflow_dispatch
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: ⏱️ Timeout Monitor
+
+# Purpose: Detect and report workflow timeout violations
+# Runs every 6 hours to check for workflows that exceeded timeout or timed out
+# Creates Issues for timeout violations with detailed information
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Run every 6 hours
+  workflow_dispatch:  # Allow manual trigger for testing
+
+# Minimum privilege principle: only the permissions we actually need
+permissions:
+  actions: read   # To list workflow runs
+  issues: write   # To create issues for timeout violations
+  contents: read  # Default read access
+
+jobs:
+  monitor-timeouts:
+    name: Monitor Workflow Timeouts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check for timeout violations
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const HOURS_TO_CHECK = 24;
+            const TIMEOUT_LABEL = 'workflow-timeout';
+
+            // Calculate timestamp for 24 hours ago
+            const twentyFourHoursAgo = new Date();
+            twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - HOURS_TO_CHECK);
+            const sinceTime = twentyFourHoursAgo.toISOString();
+
+            console.log([
+              '⏱️ Timeout Monitor Starting...',
+              '',
+              'Configuration:',
+              `  Time window: Last ${HOURS_TO_CHECK} hours`,
+              `  Since: ${sinceTime}`,
+              ''
+            ].join('\n'));
+
+            // Fetch workflow runs from the last 24 hours
+            // Using list API with per_page to get sufficient data
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              created: `>=${sinceTime}`,
+              per_page: 100
+            });
+
+            console.log(`Total runs found: ${runs.data.workflow_runs.length}`);
+
+            // Filter for timeout violations
+            // Check for:
+            // 1. conclusion: "timed_out" - workflow hit GitHub's timeout
+            // 2. conclusion: "cancelled" with timeout indicators
+            const timeoutViolations = [];
+
+            for (const run of runs.data.workflow_runs) {
+              const isCancelled = run.conclusion === 'cancelled';
+              const isTimedOut = run.conclusion === 'timed_out';
+
+              if (isTimedOut || isCancelled) {
+                console.log([
+                  '',
+                  `Checking: ${run.name}`,
+                  `  Run ID: ${run.id}`,
+                  `  Conclusion: ${run.conclusion}`,
+                  `  Status: ${run.status}`
+                ].join('\n'));
+
+                // Get job details to check for timeout indicators
+                const jobs = await github.rest.actions.listJobsForWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id
+                });
+
+                // Check if any job timed out
+                const timedOutJob = jobs.data.jobs.find(job =>
+                  job.conclusion === 'timed_out' ||
+                  job.conclusion === 'cancelled'
+                );
+
+                if (timedOutJob) {
+                  // Calculate duration in minutes
+                  const startTime = new Date(run.created_at);
+                  const endTime = new Date(run.updated_at);
+                  const durationMs = endTime - startTime;
+                  const durationMinutes = Math.floor(durationMs / 1000 / 60);
+
+                  timeoutViolations.push({
+                    workflowName: run.name,
+                    runId: run.id,
+                    runUrl: run.html_url,
+                    conclusion: run.conclusion,
+                    status: run.status,
+                    durationMinutes: durationMinutes,
+                    createdAt: run.created_at,
+                    updatedAt: run.updated_at,
+                    jobName: timedOutJob.name,
+                    jobConclusion: timedOutJob.conclusion
+                  });
+
+                  console.log(`  ⚠️ Timeout violation detected!`);
+                  console.log(`  Duration: ${durationMinutes} minutes`);
+                }
+              }
+            }
+
+            console.log([
+              '',
+              '=' .repeat(60),
+              `Total timeout violations found: ${timeoutViolations.length}`,
+              '=' .repeat(60)
+            ].join('\n'));
+
+            // If no violations found, exit successfully
+            if (timeoutViolations.length === 0) {
+              console.log([
+                '',
+                '✅ No timeout violations detected in the last 24 hours.',
+                '::notice title=✅ Timeout Monitor::No timeout violations detected'
+              ].join('\n'));
+              return;
+            }
+
+            // Group violations by workflow name for better reporting
+            const violationsByWorkflow = {};
+            for (const violation of timeoutViolations) {
+              if (!violationsByWorkflow[violation.workflowName]) {
+                violationsByWorkflow[violation.workflowName] = [];
+              }
+              violationsByWorkflow[violation.workflowName].push(violation);
+            }
+
+            // Check if we already have an open issue for timeout violations
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: TIMEOUT_LABEL,
+              state: 'open'
+            });
+
+            // For each workflow with violations, create or update an issue
+            for (const [workflowName, violations] of Object.entries(violationsByWorkflow)) {
+              console.log([
+                '',
+                `Processing violations for: ${workflowName}`,
+                `  Violations count: ${violations.length}`
+              ].join('\n'));
+
+              // Check if we already have an open issue for this workflow
+              const existingIssue = existingIssues.data.find(issue =>
+                issue.title.includes(workflowName)
+              );
+
+              if (existingIssue) {
+                console.log(`  ⏭️  Issue #${existingIssue.number} already exists, skipping...`);
+                continue;
+              }
+
+              // Build violation details table
+              const violationTable = [
+                '| Run ID | Duration | Conclusion | Date | Link |',
+                '|--------|----------|------------|------|------|'
+              ];
+
+              for (const v of violations) {
+                violationTable.push([
+                  `| ${v.runId}`,
+                  `| ${v.durationMinutes} min`,
+                  `| ${v.conclusion}`,
+                  `| ${new Date(v.createdAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`,
+                  `| [View Run](${v.runUrl}) |`
+                ].join(' '));
+              }
+
+              // Calculate statistics
+              const avgDuration = Math.floor(
+                violations.reduce((sum, v) => sum + v.durationMinutes, 0) / violations.length
+              );
+              const maxDuration = Math.max(...violations.map(v => v.durationMinutes));
+
+              // Create issue
+              const issueBody = [
+                '## ⏱️ Workflow Timeout Violation Detected',
+                '',
+                'このIssueはTimeout Monitorにより自動作成されました。',
+                '',
+                '### ワークフロー名',
+                `\`${workflowName}\``,
+                '',
+                '### 検出期間',
+                `過去 ${HOURS_TO_CHECK} 時間`,
+                '',
+                '### 統計情報',
+                `- 検出された違反数: ${violations.length}`,
+                `- 平均実行時間: ${avgDuration} 分`,
+                `- 最大実行時間: ${maxDuration} 分`,
+                '',
+                '### タイムアウト詳細',
+                '',
+                violationTable.join('\n'),
+                '',
+                '### 推奨対応',
+                '',
+                '1. **ワークフローの最適化を検討**',
+                '   - 不要なステップの削除',
+                '   - 並列実行の活用',
+                '   - キャッシュの活用',
+                '',
+                '2. **タイムアウト設定の見直し**',
+                '   - `timeout-minutes` を適切に設定',
+                '   - ジョブレベル・ステップレベルでの設定',
+                '',
+                '3. **ワークフローの分割**',
+                '   - 大きなワークフローを複数の小さなワークフローに分割',
+                '',
+                '### 関連ドキュメント',
+                '',
+                '- [GitHub Actions - Timeout設定](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idtimeout-minutes)',
+                '- [ワークフローの最適化ガイド](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows)',
+                '',
+                '---',
+                '',
+                '🤖 Auto-created by Timeout Monitor',
+                `📅 Detected at: ${new Date().toISOString()}`
+              ].join('\n');
+
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `⏱️ Timeout Violation: ${workflowName} (${violations.length} violations in ${HOURS_TO_CHECK}h)`,
+                body: issueBody,
+                labels: [TIMEOUT_LABEL, 'workflow-optimization', 'needs-review']
+              });
+
+              console.log(`  ✅ Created issue #${issue.data.number}`);
+              console.log(`  URL: ${issue.data.html_url}`);
+            }
+
+            // Set workflow annotation
+            const totalViolations = timeoutViolations.length;
+            const workflowCount = Object.keys(violationsByWorkflow).length;
+            console.log([
+              '',
+              `::warning title=⏱️ Timeout Violations Detected::${totalViolations} timeout violations found in ${workflowCount} workflows`
+            ].join('\n'));

@@ -1,0 +1,81 @@
+# Event Model v1 - STREAM A: PR-Lifecycle
+# Purpose: CI/CD pipeline for code quality checks
+# Triggers: push (main/develop), pull_request
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: '✅ コード品質チェック（Lint・テスト・ビルド）'
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: '🔍 コード品質チェック'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      matrix:
+        node-version: [20.x]
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js ${{ matrix.node-version }} セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: 依存関係のインストール
+        run: npm ci
+
+      - name: Prettier フォーマットチェック
+        run: |
+          if ! npm run format:check; then
+            echo "::error title=🔴 対応必要: コード品質チェック失敗::Prettierフォーマットチェックに失敗しました"
+            exit 1
+          fi
+
+      - name: ESLint
+        run: |
+          if ! npm run lint; then
+            echo "::error title=🔴 対応必要: コード品質チェック失敗::ESLintチェックに失敗しました"
+            exit 1
+          fi
+
+      - name: テスト実行
+        run: |
+          if ! npm test -- --coverage; then
+            echo "::error title=🔴 対応必要: コード品質チェック失敗::テストに失敗しました"
+            exit 1
+          fi
+
+      - name: ビルド
+        run: |
+          if ! npm run build; then
+            echo "::error title=🔴 対応必要: コード品質チェック失敗::ビルドに失敗しました"
+            exit 1
+          fi
+
+      - name: 成果物の確認
+        run: |
+          echo "=== ビルド成果物 ==="
+          ls -la dist/
+          echo "::notice title=✅ 対応不要: コード品質チェック成功::すべてのチェックがパスしました"
+
+      - name: カバレッジレポートのアップロード
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30

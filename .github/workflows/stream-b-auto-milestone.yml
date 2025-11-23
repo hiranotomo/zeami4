@@ -1,0 +1,225 @@
+# Event Model v1 - STREAM B: Meta-Operations
+# Purpose: Auto-assign milestone to issues
+# Triggers: issues (opened, reopened)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: ℹ️ マイルストーン自動設定
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  assign-milestone:
+    name: Auto Assign Milestone
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      issues: write
+
+    steps:
+      - name: Assign Milestone Based on Title
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const title = issue.title;
+
+            console.log(`Processing Issue #${issue.number}: ${title}`);
+
+            // 既にMilestoneが設定されている場合はスキップ
+            if (issue.milestone) {
+              console.log(`✅ Milestone already set: ${issue.milestone.title}`);
+              return;
+            }
+
+            // Milestone設定ルール（将来的には設定ファイルから読み込み可能）
+            const milestoneRules = [
+              // フェーズ学習用
+              { pattern: /フェーズ0|phase\s*0/i, milestone: 'フェーズ0: メタセットアップ' },
+              { pattern: /フェーズ1|phase\s*1/i, milestone: 'フェーズ1: GitHub Actions基礎理解' },
+              { pattern: /フェーズ2|phase\s*2/i, milestone: 'フェーズ2: LLM統合の概念' },
+              { pattern: /フェーズ3|phase\s*3/i, milestone: 'フェーズ3: 自動化の設計思想' },
+              { pattern: /フェーズ4|phase\s*4/i, milestone: 'フェーズ4: E2Eテスト戦略' },
+              { pattern: /フェーズ5|phase\s*5/i, milestone: 'フェーズ5: 運用と最適化' },
+
+              // その他のパターン（将来的に追加可能）
+              { pattern: /バグ|bug|fix/i, milestone: 'Bug Fixes' },
+              { pattern: /機能|feature|feat/i, milestone: 'New Features' },
+              { pattern: /ドキュメント|docs?|documentation/i, milestone: 'Documentation' },
+              { pattern: /テスト|test/i, milestone: 'Testing' },
+              { pattern: /リファクタ|refactor/i, milestone: 'Refactoring' },
+              { pattern: /セキュリティ|security/i, milestone: 'Security' },
+            ];
+
+            // タイトルからMilestoneを検出
+            let targetMilestoneName = null;
+            for (const rule of milestoneRules) {
+              if (rule.pattern.test(title)) {
+                targetMilestoneName = rule.milestone;
+                console.log(`📌 Pattern matched: ${rule.pattern} → ${targetMilestoneName}`);
+                break;
+              }
+            }
+
+            // マッチするパターンがない場合はスキップ（エラーにしない）
+            if (!targetMilestoneName) {
+              console.log('ℹ️ No matching pattern found. Skipping milestone assignment.');
+              return;
+            }
+
+            // 既存のMilestoneを取得
+            try {
+              const { data: milestones } = await github.rest.issues.listMilestones({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                per_page: 100
+              });
+
+              console.log(`📊 Found ${milestones.length} open milestones`);
+
+              // 完全一致または部分一致でMilestoneを検索
+              let milestone = milestones.find(m => m.title === targetMilestoneName);
+
+              // 完全一致が見つからない場合、部分一致を試す
+              if (!milestone) {
+                milestone = milestones.find(m =>
+                  m.title.includes(targetMilestoneName) ||
+                  targetMilestoneName.includes(m.title)
+                );
+              }
+
+              if (!milestone) {
+                console.log(`⚠️ Milestone "${targetMilestoneName}" not found.`);
+                console.log('Available milestones:', milestones.map(m => m.title).join(', '));
+
+                // Milestoneが見つからない場合、コメントで通知（エラーにはしない）
+                const commentBody = [
+                  `ℹ️ Milestone候補「${targetMilestoneName}」が見つかりませんでした。`,
+                  '',
+                  '必要に応じて、以下のいずれかを行ってください:',
+                  '1. 新しいMilestoneを作成する',
+                  '2. 既存のMilestoneから選択して手動で設定する',
+                  '',
+                  '利用可能なMilestone:',
+                  milestones.length > 0 ? milestones.map(m => `- ${m.title}`).join('\n') : '（なし）'
+                ].join('\n');
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: commentBody
+                });
+                return;
+              }
+
+              console.log(`✅ Found milestone: ${milestone.title} (ID: ${milestone.number})`);
+
+              // Milestoneを設定
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                milestone: milestone.number
+              });
+
+              console.log(`✅ Milestone "${milestone.title}" assigned to Issue #${issue.number}`);
+
+              // 成功コメント
+              const successComment = [
+                `✅ Milestone「**${milestone.title}**」を自動設定しました。`,
+                '',
+                'このMilestoneは、Issueタイトルのパターンマッチングにより自動的に選択されました。',
+                '必要に応じて、手動で変更することも可能です。'
+              ].join('\n');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: successComment
+              });
+
+            } catch (error) {
+              console.error('Error in milestone assignment:', error);
+              // エラーが発生してもワークフロー自体は失敗させない
+              console.log('⚠️ Milestone assignment failed, but continuing workflow.');
+            }
+
+      - name: Check Milestone Progression
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const title = issue.title;
+
+            // フェーズ番号を抽出
+            const phaseMatch = title.match(/フェーズ(\d+)|phase\s*(\d+)/i);
+
+            if (!phaseMatch) {
+              console.log('Not a phase-related issue, skipping progression check');
+              return;
+            }
+
+            const requestedPhase = parseInt(phaseMatch[1] || phaseMatch[2]);
+            console.log(`Requested phase: ${requestedPhase}`);
+
+            // フェーズ0の場合はチェック不要
+            if (requestedPhase === 0) {
+              console.log('Phase 0 does not require progression check');
+              return;
+            }
+
+            // 前のフェーズのMilestoneを取得
+            const { data: milestones } = await github.rest.issues.listMilestones({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100
+            });
+
+            const previousPhaseNum = requestedPhase - 1;
+            const previousMilestone = milestones.find(m =>
+              m.title.includes(`フェーズ${previousPhaseNum}`)
+            );
+
+            if (!previousMilestone) {
+              console.log(`Previous phase milestone not found: フェーズ${previousPhaseNum}`);
+              return;
+            }
+
+            // 前のフェーズが完了（closed）しているかチェック
+            if (previousMilestone.state === 'open') {
+              console.log(`⚠️ Previous phase is still open: ${previousMilestone.title}`);
+
+              const warningMessage = [
+                `## ⚠️ 前のフェーズが未完了です`,
+                '',
+                `このIssueは「フェーズ${requestedPhase}」に関連していますが、**前のフェーズ（フェーズ${previousPhaseNum}）がまだ完了していません**。`,
+                '',
+                '### 推奨事項:',
+                `1. まず [フェーズ${previousPhaseNum}: ${previousMilestone.title}](${previousMilestone.html_url}) を完了させてください`,
+                '2. 段階的な学習により、理解が深まります',
+                '',
+                '### このIssueを進めたい場合:',
+                '- 順序を飛ばす理由がある場合は、そのままこのIssueを進めることもできます',
+                '- ただし、前提知識が不足する可能性があることを理解してください',
+                '',
+                '💡 **ヒント**: このチェックは強制ではなく、あくまで推奨です。'
+              ].join('\n');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: warningMessage
+              });
+            } else {
+              console.log(`✅ Previous phase is completed: ${previousMilestone.title}`);
+            }

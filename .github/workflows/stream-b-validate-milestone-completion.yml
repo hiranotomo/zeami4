@@ -1,0 +1,178 @@
+# Event Model v1 - STREAM B: Meta-Operations
+# Purpose: Validate milestone completion
+# Triggers: milestone (closed)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: ⚠️ マイルストーン完了検証
+
+on:
+  milestone:
+    types: [closed]
+
+permissions:
+  issues: write
+
+jobs:
+  validate-completion:
+    name: Check All Issues Completed
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      issues: write
+
+    steps:
+      - name: Validate Milestone Completion
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const milestone = context.payload.milestone;
+
+            console.log(`Validating milestone: ${milestone.title} (ID: ${milestone.number})`);
+
+            // Milestoneに紐づく全てのIssueを取得
+            const { data: allIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              milestone: milestone.number,
+              state: 'all',
+              per_page: 100
+            });
+
+            console.log(`Total issues in milestone: ${allIssues.length}`);
+
+            // openなIssueをフィルタリング
+            const openIssues = allIssues.filter(issue =>
+              issue.state === 'open' && !issue.pull_request
+            );
+
+            console.log(`Open issues found: ${openIssues.length}`);
+
+            if (openIssues.length > 0) {
+              // 未完了Issueがある場合
+              console.log('⚠️ Milestone has open issues. Reopening...');
+
+              // Milestoneを再オープン
+              await github.rest.issues.updateMilestone({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                milestone_number: milestone.number,
+                state: 'open'
+              });
+
+              console.log('✅ Milestone reopened');
+
+              // 未完了Issueのリストを作成
+              const issueList = openIssues.map(issue =>
+                `- #${issue.number}: ${issue.title}`
+              ).join('\n');
+
+              // 警告コメントを作成
+              const warningMessage = [
+                `## ⚠️ Milestone「${milestone.title}」に未完了Issueがあります`,
+                '',
+                'このMilestoneをクローズしようとしましたが、以下のIssueがまだ完了していません:',
+                '',
+                issueList,
+                '',
+                '### 対応方法:',
+                '1. 上記の全てのIssueを完了（クローズ）してください',
+                '2. すべてのIssueが完了したら、再度Milestoneをクローズできます',
+                '',
+                '### または:',
+                '- これらのIssueを別のMilestoneに移動する',
+                '- これらのIssueをクローズせずにMilestoneから削除する',
+                '',
+                `📊 **進捗**: ${allIssues.length - openIssues.length}/${allIssues.length} Issues完了`,
+                '',
+                '---',
+                '',
+                '💡 **Note**: このMilestoneは自動的に再オープンされました。すべてのIssueを完了してから再度クローズしてください。'
+              ].join('\n');
+
+              // Milestoneにコメントを追加（最新のIssueにコメント）
+              // Milestoneディスカッション機能がないため、最新の関連Issueにコメント
+              if (allIssues.length > 0) {
+                // 最新のIssue（openまたはclosed）にコメント
+                const latestIssue = allIssues.sort((a, b) =>
+                  new Date(b.updated_at) - new Date(a.updated_at)
+                )[0];
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: latestIssue.number,
+                  body: warningMessage
+                });
+
+                console.log(`Warning comment added to Issue #${latestIssue.number}`);
+              }
+
+              // 各未完了Issueにも個別に通知
+              for (const issue of openIssues) {
+                const individualWarning = [
+                  `⚠️ このIssueは、Milestone「**${milestone.title}**」の完了をブロックしています。`,
+                  '',
+                  'このIssueを完了するか、別のMilestoneに移動してください。',
+                  '',
+                  `📊 残りの未完了Issue: ${openIssues.length}件`
+                ].join('\n');
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: individualWarning
+                });
+
+                console.log(`Individual warning added to Issue #${issue.number}`);
+              }
+
+              // ワークフローを失敗させる
+              core.setFailed(`❌ Milestone cannot be closed: ${openIssues.length} open issue(s) remaining`);
+
+            } else {
+              // 全Issue完了の場合
+              console.log('✅ All issues in milestone are completed');
+
+              const closedIssues = allIssues.filter(issue =>
+                issue.state === 'closed' && !issue.pull_request
+              );
+
+              const completionMessage = [
+                `## ✅ Milestone「${milestone.title}」が完了しました！`,
+                '',
+                `🎉 おめでとうございます！このMilestoneの全てのIssueが完了しました。`,
+                '',
+                `📊 **完了統計**:`,
+                `- 完了したIssue: ${closedIssues.length}件`,
+                `- 総Issue数: ${allIssues.length}件`,
+                '',
+                '### 次のステップ:',
+                '- 次のMilestoneの計画を立てる',
+                '- 学習内容を振り返る',
+                '- ドキュメントを更新する',
+                '',
+                '---',
+                '',
+                '💡 **素晴らしい進捗です！次のフェーズに進みましょう。**'
+              ].join('\n');
+
+              // 完了メッセージを最新のIssueに投稿
+              if (allIssues.length > 0) {
+                const latestIssue = allIssues.sort((a, b) =>
+                  new Date(b.updated_at) - new Date(a.updated_at)
+                )[0];
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: latestIssue.number,
+                  body: completionMessage
+                });
+
+                console.log(`Completion message added to Issue #${latestIssue.number}`);
+              }
+
+              console.log(`✅ Milestone "${milestone.title}" successfully closed with all issues completed`);
+            }

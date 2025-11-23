@@ -1,0 +1,32 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Auto-fix PR blockers when labeled
+# Triggers: issues (labeled: workflow-bug, pr-blocker)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🚨 Auto-Fix PR Blocker
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  auto-fix:
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.label.name, 'workflow-bug') ||
+      contains(github.event.label.name, 'pr-blocker')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trigger @claude mention
+        run: |
+          gh issue comment ${{ github.event.issue.number }} \
+            --body "@claude この Issue の PR blocker を自動修復してください"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,94 @@
+# Event Model v1 - STREAM C: Self-Healing/Monitoring
+# Purpose: Validate Event Model v1 compliance
+# Triggers: schedule (daily), pull_request (paths: .github/workflows/**)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: Validate Event Model v1 Compliance
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for wildcard workflow_run
+        run: |
+          if grep -r 'workflows: \["\*"\]' .github/workflows/; then
+            echo "ERROR: Wildcard workflow_run found!"
+            exit 1
+          fi
+
+      - name: Count workflow_run usage
+        run: |
+          count=$(grep -r 'workflow_run:' .github/workflows/ | grep -v 'stream-c-validate-event-model.yml' | wc -l | tr -d ' ')
+          if [ $count -gt 2 ]; then
+            echo "ERROR: Too many workflow_run ($count > 2)"
+            exit 1
+          fi
+
+      - name: Validate Stream A
+        run: |
+          for file in .github/workflows/stream-a-*.yml; do
+            # Extract only the 'on:' section (stop at 'permissions:' or 'jobs:')
+            if sed -n '/^on:/,/^permissions:\|^jobs:/p' "$file" | grep -E '^\s+(issues|projects_v2_item|gollum|milestone):'; then
+              echo "ERROR: Stream A violation in $file (uses Meta-Operations triggers)"
+              exit 1
+            fi
+          done
+
+      - name: Validate Stream B
+        run: |
+          for file in .github/workflows/stream-b-*.yml; do
+            if grep -q 'pull_request:' "$file"; then
+              if ! grep -A 10 'pull_request:' "$file" | grep -q 'paths:'; then
+                echo "ERROR: Stream B violation in $file (pull_request without paths filter)"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Validate Stream C
+        run: |
+          for file in .github/workflows/stream-c-*.yml; do
+            # Skip this validation workflow itself
+            if [[ "$file" == *"stream-c-validate-event-model.yml" ]]; then
+              continue
+            fi
+            # Extract only the 'on:' section (stop at 'permissions:' or 'jobs:')
+            if sed -n '/^on:/,/^permissions:\|^jobs:/p' "$file" | grep -E '^\s+pull_request:'; then
+              echo "ERROR: Stream C violation in $file (uses pull_request trigger)"
+              exit 1
+            fi
+          done
+
+      - name: Check unclassified
+        run: |
+          unclassified=$(ls .github/workflows/*.yml 2>/dev/null | grep -v "stream-" || true)
+          if [ -n "$unclassified" ]; then
+            echo "ERROR: Unclassified workflows found:"
+            echo "$unclassified"
+            exit 1
+          fi
+
+      - name: Create issue if violations found
+        if: failure()
+        run: |
+          gh issue create \
+            --title "🚨 Event Model v1 Violation Detected" \
+            --label "event-model-v1,violation,bug" \
+            --body "Violations found. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

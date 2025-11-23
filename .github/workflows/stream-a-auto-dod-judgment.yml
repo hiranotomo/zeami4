@@ -1,0 +1,242 @@
+# Event Model v1 - STREAM A: PR-Lifecycle
+# Purpose: Auto-judge Definition of Done
+# Triggers: pull_request, pull_request_review
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: 🎯 Auto DOD Judgment
+
+# PR作成時に変更内容を分析してDODを自動判定・提示
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  analyze-and-suggest-dod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for diff
+
+      - name: Analyze changed files
+        id: analyze
+        run: |
+          # 変更ファイル取得
+          git fetch origin ${{ github.base_ref }}
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          # 変更タイプ判定 (grep -c returns exit 1 when count is 0, so disable -e temporarily)
+          set +e
+          WORKFLOW_CHANGES=$(echo "$CHANGED_FILES" | grep -c "^\.github/workflows/")
+          AGENT_CHANGES=$(echo "$CHANGED_FILES" | grep -c "^\.claude/agents/")
+          CODE_CHANGES=$(echo "$CHANGED_FILES" | grep -cE "\.(js|ts|jsx|tsx)$")
+          TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -cE "\.test\.(js|ts)$")
+          DOC_CHANGES=$(echo "$CHANGED_FILES" | grep -c "\.md$")
+          set -e
+          TOTAL_FILES=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
+
+          # テストレベル判定（TEST_LEVEL_MATRIX.mdに基づく）
+          TEST_LEVEL=1
+          CHANGE_TYPE="mixed"
+
+          if [ "$WORKFLOW_CHANGES" -gt 0 ]; then
+            TEST_LEVEL=3  # Integration tests
+            CHANGE_TYPE="workflow"
+          elif [ "$AGENT_CHANGES" -gt 0 ]; then
+            TEST_LEVEL=2  # Unit tests
+            CHANGE_TYPE="agent"
+          elif [ "$CODE_CHANGES" -gt 0 ]; then
+            TEST_LEVEL=2  # Unit tests
+            CHANGE_TYPE="code"
+          elif [ "$TEST_CHANGES" -gt 0 ]; then
+            TEST_LEVEL=2  # Test code
+            CHANGE_TYPE="test"
+          elif [ "$DOC_CHANGES" -eq "$TOTAL_FILES" ]; then
+            TEST_LEVEL=0  # No tests (docs only)
+            CHANGE_TYPE="docs"
+          fi
+
+          echo "test_level=$TEST_LEVEL" >> $GITHUB_OUTPUT
+          echo "change_type=$CHANGE_TYPE" >> $GITHUB_OUTPUT
+          echo "workflow_changes=$WORKFLOW_CHANGES" >> $GITHUB_OUTPUT
+          echo "agent_changes=$AGENT_CHANGES" >> $GITHUB_OUTPUT
+          echo "code_changes=$CODE_CHANGES" >> $GITHUB_OUTPUT
+          echo "doc_changes=$DOC_CHANGES" >> $GITHUB_OUTPUT
+
+      - name: Generate and post DOD checklist
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testLevel = '${{ steps.analyze.outputs.test_level }}';
+            const changeType = '${{ steps.analyze.outputs.change_type }}';
+            const workflowChanges = '${{ steps.analyze.outputs.workflow_changes }}';
+            const agentChanges = '${{ steps.analyze.outputs.agent_changes }}';
+            const codeChanges = '${{ steps.analyze.outputs.code_changes }}';
+
+            // 変更タイプに応じたDOD生成
+            let dod = '';
+            let testPlan = '';
+
+            if (changeType === 'workflow') {
+              dod = `## ✅ Definition of Done (Auto-Generated)
+
+            Change Type: Workflow Modification (Test Level ${testLevel})
+
+            ### 必須項目
+            - [ ] Workflow syntax check (actionlint)
+            - [ ] YAML validation (yamllint)
+            - [ ] Dry-run test (if workflow_dispatch available)
+            - [ ] Manual trigger test in production
+            - [ ] Error case validation
+            - [ ] Log output verification
+
+            ### 推奨項目
+            - [ ] Performance impact check
+            - [ ] Rollback plan documented
+
+            ### 重要
+            ⚠️ ワークフローは本番環境でしかテストできない機能があります
+            - マージ後に必ず動作確認してください
+            - 問題があればすぐにロールバックしてください`;
+
+              testPlan = `## 🧪 Suggested Test Plan
+
+            \`\`\`bash
+            # 1. Syntax check
+            actionlint .github/workflows/*.yml
+
+            # 2. YAML validation
+            yamllint .github/workflows/*.yml
+
+            # 3. Manual trigger (after merge)
+            gh workflow run <workflow-name>.yml
+            gh run watch
+            \`\`\``;
+
+            } else if (changeType === 'agent') {
+              dod = `## ✅ Definition of Done (Auto-Generated)
+
+            Change Type: Agent Modification (Test Level ${testLevel})
+
+            ### 必須項目
+            - [ ] Agent definition syntax check
+            - [ ] Permission verification
+            - [ ] Sample task execution
+            - [ ] Token usage measurement
+
+            ### 推奨項目
+            - [ ] Edge case testing
+            - [ ] Error handling verification`;
+
+              testPlan = `## 🧪 Suggested Test Plan
+
+            \`\`\`bash
+            # Agent syntax check
+            # (Manual verification of agent definition)
+
+            # Sample task execution
+            # @<agent-name> <sample-task>
+            \`\`\``;
+
+            } else if (changeType === 'code') {
+              dod = `## ✅ Definition of Done (Auto-Generated)
+
+            Change Type: Code Modification (Test Level ${testLevel})
+
+            ### 必須項目
+            - [ ] Unit tests added/updated
+            - [ ] Existing tests pass
+            - [ ] Lint check pass
+            - [ ] Build successful
+            - [ ] Integration tests (if applicable)
+
+            ### 推奨項目
+            - [ ] Code review
+            - [ ] Documentation updated`;
+
+              testPlan = `## 🧪 Suggested Test Plan
+
+            \`\`\`bash
+            # 1. Lint
+            npm run lint
+
+            # 2. Tests
+            npm test
+
+            # 3. Build
+            npm run build
+            \`\`\``;
+
+            } else if (changeType === 'docs') {
+              dod = `## ✅ Definition of Done (Auto-Generated)
+
+            Change Type: Documentation (Test Level ${testLevel})
+
+            ### 必須項目
+            - [ ] Link check (no broken links)
+            - [ ] Format validation (markdown)
+            - [ ] Spelling check
+
+            ### 推奨項目
+            - [ ] Screenshots updated (if applicable)
+            - [ ] Examples tested`;
+
+              testPlan = `## 🧪 Suggested Test Plan
+
+            \`\`\`bash
+            # Link check
+            markdown-link-check *.md
+
+            # Format check
+            markdownlint *.md
+            \`\`\``;
+
+            } else {
+              dod = `## ✅ Definition of Done (Auto-Generated)
+
+            Change Type: Mixed Changes (Test Level ${testLevel})
+
+            ### 必須項目
+            - [ ] All relevant tests pass
+            - [ ] Code review completed
+            - [ ] Documentation updated (if needed)
+
+            ### 推奨項目
+            - [ ] Manual testing`;
+
+              testPlan = `## 🧪 Suggested Test Plan
+
+            Review each change type and execute appropriate tests.`;
+            }
+
+            // 統計情報
+            const stats = `## 📊 Change Statistics
+
+            - Test Level: ${testLevel}
+            - Change Type: ${changeType}
+            - Workflow files: ${workflowChanges}
+            - Agent files: ${agentChanges}
+            - Code files: ${codeChanges}`;
+
+            // コメント投稿
+            const body = `${dod}\n\n${testPlan}\n\n${stats}\n\n---\n\n🤖 Auto-generated by [DOD Judgment System](https://github.com/hiranotomo/zeami4/issues/445)\n\n📚 See: [DOD_TEMPLATES.md](https://github.com/hiranotomo/zeami4/blob/main/.github/DOD_TEMPLATES.md) | [TEST_LEVEL_MATRIX.md](https://github.com/hiranotomo/zeami4/blob/main/.github/TEST_LEVEL_MATRIX.md)`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: body
+            });
+
+            core.info(`✅ DOD posted for ${changeType} (Level ${testLevel})`);

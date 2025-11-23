@@ -1,0 +1,149 @@
+# Event Model v1 - STREAM A: PR-Lifecycle
+# Purpose: Validate workflow YAML syntax
+# Triggers: pull_request (paths: .github/workflows/**)
+# Dependencies: None
+# Last updated: 2025-11-23
+
+name: Validate Workflow Syntax
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate-syntax:
+    name: Validate YAML Syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Skip on push events (workflow only designed for pull_request context)
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Handle checkout failure
+        if: steps.checkout.outcome == 'failure'
+        run: |
+          echo "⚠️ Checkout failed - likely infrastructure error (Repository not found, API timeout, etc.)"
+          echo "Skipping validation to avoid false positive workflow failures"
+          echo "This is expected behavior during temporary GitHub API outages"
+
+      - name: Setup Node.js
+        if: steps.checkout.outcome == 'success'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install yamllint
+        if: steps.checkout.outcome == 'success'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y yamllint
+
+      - name: Validate YAML files
+        if: steps.checkout.outcome == 'success'
+        run: |
+          echo "Validating workflow YAML files..."
+          for file in .github/workflows/*.yml; do
+            echo "Checking $file..."
+            yamllint -d relaxed "$file" || exit 1
+          done
+          echo "✅ All workflow files have valid YAML syntax"
+
+      - name: Check GitHub Actions syntax
+        if: steps.checkout.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // Infrastructure error detection
+            const isInfraError = (error) => {
+              const infraPatterns = ['Repository not found', 'API rate limit', 'timeout', 'ECONNRESET', 'ETIMEDOUT'];
+              const errorMsg = error?.message || error?.toString() || '';
+              return infraPatterns.some(p => errorMsg.includes(p));
+            };
+
+            console.log('Checking GitHub Actions specific syntax...');
+
+            const workflowDir = '.github/workflows';
+            const files = fs.readdirSync(workflowDir).filter(f => f.endsWith('.yml'));
+
+            let errors = [];
+
+            for (const file of files) {
+              const filePath = path.join(workflowDir, file);
+              const content = fs.readFileSync(filePath, 'utf8');
+
+              console.log(`Checking ${file}...`);
+
+              // Check for common syntax issues
+              // 1. Unclosed ${{ }}
+              const openBraces = (content.match(/\$\{\{/g) || []).length;
+              const closeBraces = (content.match(/\}\}/g) || []).length;
+              if (openBraces !== closeBraces) {
+                errors.push(`${file}: Mismatched ${{ }} braces (open: ${openBraces}, close: ${closeBraces})`);
+              }
+
+              // 2. Invalid secret reference
+              const secretPattern = /secrets\.\w+/g;
+              const secrets = content.match(secretPattern) || [];
+              for (const secret of secrets) {
+                if (!secret.match(/secrets\.[A-Z_]+/)) {
+                  errors.push(`${file}: Invalid secret name format: ${secret} (should be UPPER_CASE)`);
+                }
+              }
+
+              // 3. Check for common typos
+              if (content.includes('step.')) {
+                errors.push(`${file}: Found 'step.' - should be 'steps.'`);
+              }
+
+              console.log(`  ✅ ${file} passed syntax checks`);
+            }
+
+            if (errors.length > 0) {
+              const errorMessage = [
+                '## ❌ GitHub Actions構文エラー',
+                '',
+                '以下のワークフローファイルに構文エラーが見つかりました:',
+                '',
+                ...errors.map(e => `- ${e}`),
+                '',
+                '### 修正方法:',
+                '1. ファイルを確認して構文エラーを修正してください',
+                '2. ${{ }} の開閉を確認',
+                '3. secrets の参照を確認',
+                '4. steps/step のタイプミスを確認'
+              ].join('\n');
+
+              core.setFailed(`Found ${errors.length} syntax error(s)`);
+
+              if (context.payload.pull_request?.number) {
+                try {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.payload.pull_request.number,
+                    body: errorMessage
+                  });
+                } catch (error) {
+                  if (isInfraError(error)) {
+                    console.log('⚠️ Infrastructure error posting comment - continuing');
+                  } else {
+                    throw error;
+                  }
+                }
+              }
+            } else {
+              console.log('✅ All workflow files passed GitHub Actions syntax checks');
+            }
