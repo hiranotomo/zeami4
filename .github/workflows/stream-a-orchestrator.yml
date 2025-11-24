@@ -1,0 +1,576 @@
+# Event Model v2 - STREAM A: PR-Lifecycle Orchestrator
+# Purpose: Orchestrate all STREAM A validations with context sharing and auto-fix
+# Triggers: pull_request
+# Dependencies: All STREAM A validators
+# Last updated: 2025-11-24
+
+name: 🎯 STREAM A Orchestrator
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  checks: write
+
+env:
+  CONTEXT_FILE: /tmp/stream-a-context-${{ github.event.pull_request.number }}.json
+  AUTO_FIX_ENABLED: true
+  ORCHESTRATOR_VERSION: "1.0.0"
+
+jobs:
+  orchestrate:
+    name: Orchestrate STREAM A Validations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Initialize Context
+        id: init_context
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+
+            // Extract issue number from branch name or PR title/body
+            const branchMatch = pr.head.ref.match(/\/(\d+)-/);
+            const titleMatch = pr.title.match(/#(\d+)/);
+            const bodyMatch = (pr.body || '').match(/#(\d+)/);
+            const issueNumber = branchMatch?.[1] || titleMatch?.[1] || bodyMatch?.[1] || null;
+
+            const contextData = {
+              version: process.env.ORCHESTRATOR_VERSION,
+              workflow: 'stream-a',
+              pr: {
+                number: pr.number,
+                title: pr.title,
+                branch: pr.head.ref,
+                base: pr.base.ref,
+                head_sha: pr.head.sha,
+                author: pr.user.login,
+                created_at: pr.created_at,
+                issue_reference: issueNumber ? parseInt(issueNumber) : null
+              },
+              validations: {},
+              auto_fixes_applied: [],
+              summary: {
+                total_validations: 0,
+                passed: 0,
+                failed: 0,
+                warnings: 0,
+                pending: 0,
+                auto_fixes_attempted: 0,
+                auto_fixes_succeeded: 0,
+                final_status: 'pending',
+                can_merge: true,
+                blocking_issues: []
+              },
+              metadata: {
+                orchestrator_version: process.env.ORCHESTRATOR_VERSION,
+                started_at: new Date().toISOString()
+              }
+            };
+
+            fs.writeFileSync(process.env.CONTEXT_FILE, JSON.stringify(contextData, null, 2));
+
+            core.info(`✅ Context initialized for PR #${pr.number}`);
+            core.info(`   Branch: ${pr.head.ref}`);
+            core.info(`   Issue: ${issueNumber || 'Not detected'}`);
+
+            return contextData;
+
+      - name: Validate Branch Name
+        id: validate_branch
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+            const branch = pr.head.ref;
+
+            console.log(`Validating branch name: ${branch}`);
+
+            const validPattern = /^(feature|hotfix|docs|test|fix)\/\d+-[\w-]+$/;
+            const isValid = validPattern.test(branch);
+
+            const result = {
+              status: isValid ? 'pass' : 'fail',
+              checked_at: new Date().toISOString(),
+              message: isValid ? 'Branch name follows convention' : 'Branch name invalid',
+              details: {
+                pattern: branch,
+                valid: isValid
+              },
+              auto_fix_available: !isValid && branch.includes('-')
+            };
+
+            if (isValid) {
+              const match = branch.match(/^(feature|hotfix|docs|test|fix)\/(\d+)-([\w-]+)$/);
+              result.details = {
+                pattern: branch,
+                type: match[1],
+                issue_number: parseInt(match[2]),
+                description: match[3],
+                valid: true
+              };
+            }
+
+            // Update context
+            const context_data = JSON.parse(fs.readFileSync(process.env.CONTEXT_FILE, 'utf8'));
+            context_data.validations.branch_name = result;
+            context_data.summary.total_validations++;
+            if (isValid) {
+              context_data.summary.passed++;
+            } else {
+              context_data.summary.failed++;
+              context_data.summary.blocking_issues.push('branch_name');
+            }
+            fs.writeFileSync(process.env.CONTEXT_FILE, JSON.stringify(context_data, null, 2));
+
+            if (!isValid) {
+              core.setFailed(`Branch name invalid: ${branch}`);
+            }
+
+            return result;
+
+      - name: Auto-Fix Branch Name
+        if: steps.validate_branch.outcome == 'failure' && env.AUTO_FIX_ENABLED == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+            const context_data = JSON.parse(fs.readFileSync(process.env.CONTEXT_FILE, 'utf8'));
+
+            core.warning('⚠️ Auto-fix for branch name not implemented yet (Phase 1 limitation)');
+            core.warning('Manual fix required: Create new branch with format {type}/{issue}-{desc}');
+
+            // Log auto-fix attempt
+            context_data.auto_fixes_applied.push({
+              validation: 'branch_name',
+              timestamp: new Date().toISOString(),
+              strategy: 'normalize_branch_name',
+              result: 'not_implemented',
+              message: 'Auto-fix for branch name requires manual intervention'
+            });
+            context_data.summary.auto_fixes_attempted++;
+
+            fs.writeFileSync(process.env.CONTEXT_FILE, JSON.stringify(context_data, null, 2));
+
+      - name: Validate Commit Messages
+        id: validate_commits
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+
+            console.log('Validating commit messages...');
+
+            // Get PR commits
+            const { data: prCommits } = await github.rest.pulls.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+
+            const commits = prCommits.map(c => ({
+              sha: c.sha.substring(0, 7),
+              message: c.commit.message,
+              full_sha: c.sha
+            }));
+
+            const issuePattern = /#\d+/;
+            const invalidCommits = [];
+
+            for (const commit of commits) {
+              if (!commit.message.includes('Merge') &&
+                  !commit.message.includes('Resolve merge conflict') &&
+                  !issuePattern.test(commit.message)) {
+                invalidCommits.push(commit);
+              }
+            }
+
+            const isValid = invalidCommits.length === 0;
+
+            const result = {
+              status: isValid ? 'pass' : 'fail',
+              checked_at: new Date().toISOString(),
+              message: isValid
+                ? `All ${commits.length} commits have issue references`
+                : `${invalidCommits.length} commits missing issue reference`,
+              details: {
+                total_commits: commits.length,
+                valid_commits: commits.length - invalidCommits.length,
+                invalid_commits: invalidCommits.map(c => ({
+                  sha: c.sha,
+                  message: c.message.split('\n')[0],
+                  reason: 'No issue reference'
+                }))
+              },
+              auto_fix_available: invalidCommits.length > 0
+            };
+
+            // Update context
+            const context_data = JSON.parse(fs.readFileSync(process.env.CONTEXT_FILE, 'utf8'));
+            context_data.validations.commit_message = result;
+            context_data.summary.total_validations++;
+            if (isValid) {
+              context_data.summary.passed++;
+            } else {
+              context_data.summary.failed++;
+              context_data.summary.blocking_issues.push('commit_message');
+            }
+            fs.writeFileSync(process.env.CONTEXT_FILE, JSON.stringify(context_data, null, 2));
+
+            if (!isValid) {
+              core.setFailed(`${invalidCommits.length} commits missing issue reference`);
+            }
+
+            return result;
+
+      - name: Auto-Fix Commit Messages
+        if: steps.validate_commits.outcome == 'failure' && env.AUTO_FIX_ENABLED == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            const context_data = JSON.parse(fs.readFileSync(process.env.CONTEXT_FILE, 'utf8'));
+
+            core.warning('⚠️ Auto-fix for commit messages not implemented yet (Phase 1 limitation)');
+            core.warning('Manual fix required: Amend commits with issue reference');
+
+            const issueNumber = context_data.pr.issue_reference;
+            if (!issueNumber) {
+              core.warning('Cannot auto-fix: No issue number detected');
+              return;
+            }
+
+            core.info(`Suggested fix: Add "#${issueNumber}" to commit messages`);
+
+            // Log auto-fix attempt
+            context_data.auto_fixes_applied.push({
+              validation: 'commit_message',
+              timestamp: new Date().toISOString(),
+              strategy: 'amend_commit_message',
+              result: 'not_implemented',
+              message: `Manual fix: Add #${issueNumber} to commit messages`
+            });
+            context_data.summary.auto_fixes_attempted++;
+
+            fs.writeFileSync(process.env.CONTEXT_FILE, JSON.stringify(context_data, null, 2));
+
+      - name: Validate PR Files
+        id: validate_files
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+
+            console.log('Validating PR files...');
+
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+
+            const sourceChanges = files.filter(f =>
+              f.filename.startsWith('src/') &&
+              !f.filename.includes('.spec.') &&
+              !f.filename.includes('.test.') &&
+              (f.filename.endsWith('.ts') || f.filename.endsWith('.js'))
+            );
+
+            const testChanges = files.filter(f =>
+              f.filename.includes('.spec.') ||
+              f.filename.includes('.test.') ||
+              f.filename.startsWith('tests/')
+            );
+
+            const hasTestGap = sourceChanges.length > 0 && testChanges.length === 0;
+
+            const result = {
+              status: hasTestGap ? 'warning' : 'pass',
+              checked_at: new Date().toISOString(),
+              message: hasTestGap ? 'No test files changed' : 'Test files present',
+              details: {
+                source_files_changed: sourceChanges.length,
+                test_files_changed: testChanges.length,
+                files: files.map(f => f.filename)
+              },
+              auto_fix_available: false
+            };
+
+            // Update context
+            const context_data = JSON.parse(fs.readFileSync(process.env.CONTEXT_FILE, 'utf8'));
+            context_data.validations.pr_files = result;
+            context_data.summary.total_validations++;
+            if (hasTestGap) {
+              context_data.summary.warnings++;
+            } else {
+              context_data.summary.passed++;
+            }
+            fs.writeFileSync(process.env.CONTEXT_FILE, JSON.stringify(context_data, null, 2));
+
+            return result;
+
+      - name: Validate Issue DoD
+        id: validate_dod
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const context_data = JSON.parse(fs.readFileSync(process.env.CONTEXT_FILE, 'utf8'));
+            const issueNumber = context_data.pr.issue_reference;
+
+            if (!issueNumber) {
+              core.notice('No issue reference found - skipping DoD validation');
+              return { status: 'skipped' };
+            }
+
+            console.log(`Validating DoD for Issue #${issueNumber}...`);
+
+            try {
+              const { data: issue } = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber
+              });
+
+              const issueBody = issue.body || '';
+              const totalCheckboxes = (issueBody.match(/- \[[ xX]\]/g) || []).length;
+              const checkedCheckboxes = (issueBody.match(/- \[xX\]/g) || []).length;
+              const uncheckedCheckboxes = totalCheckboxes - checkedCheckboxes;
+
+              const isComplete = uncheckedCheckboxes === 0 && totalCheckboxes > 0;
+
+              const result = {
+                status: isComplete ? 'pass' : totalCheckboxes === 0 ? 'skipped' : 'warning',
+                checked_at: new Date().toISOString(),
+                message: isComplete
+                  ? 'All DoD items checked'
+                  : `${uncheckedCheckboxes} DoD items unchecked`,
+                details: {
+                  issue_number: issueNumber,
+                  issue_title: issue.title,
+                  total_checkboxes: totalCheckboxes,
+                  checked_checkboxes: checkedCheckboxes,
+                  unchecked_checkboxes: uncheckedCheckboxes
+                },
+                auto_fix_available: false
+              };
+
+              // Update context
+              context_data.validations.dod_checklist = result;
+              context_data.summary.total_validations++;
+              if (isComplete) {
+                context_data.summary.passed++;
+              } else if (totalCheckboxes === 0) {
+                // Skipped
+              } else {
+                context_data.summary.warnings++;
+              }
+              fs.writeFileSync(process.env.CONTEXT_FILE, JSON.stringify(context_data, null, 2));
+
+              return result;
+            } catch (error) {
+              core.warning(`Failed to fetch issue #${issueNumber}: ${error.message}`);
+              return { status: 'error', message: error.message };
+            }
+
+      - name: Check Merge Conflicts
+        id: check_conflicts
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+
+            console.log('Checking for merge conflicts...');
+
+            const { data: prData } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+
+            const hasConflict = prData.mergeable === false;
+
+            const result = {
+              status: hasConflict ? 'fail' : 'pass',
+              checked_at: new Date().toISOString(),
+              message: hasConflict ? 'Merge conflicts detected' : 'No merge conflicts',
+              details: {
+                mergeable: prData.mergeable,
+                mergeable_state: prData.mergeable_state
+              },
+              auto_fix_available: false
+            };
+
+            // Update context
+            const context_data = JSON.parse(fs.readFileSync(process.env.CONTEXT_FILE, 'utf8'));
+            context_data.validations.conflicts = result;
+            context_data.summary.total_validations++;
+            if (hasConflict) {
+              context_data.summary.failed++;
+              context_data.summary.blocking_issues.push('conflicts');
+            } else {
+              context_data.summary.passed++;
+            }
+            fs.writeFileSync(process.env.CONTEXT_FILE, JSON.stringify(context_data, null, 2));
+
+            if (hasConflict) {
+              core.setFailed('Merge conflicts detected');
+            }
+
+            return result;
+
+      - name: Finalize Context
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const context_data = JSON.parse(fs.readFileSync(process.env.CONTEXT_FILE, 'utf8'));
+
+            // Calculate final status
+            const { summary } = context_data;
+            if (summary.failed > 0) {
+              summary.final_status = 'fail';
+              summary.can_merge = false;
+            } else if (summary.warnings > 0) {
+              summary.final_status = 'warning';
+              summary.can_merge = true;
+            } else {
+              summary.final_status = 'pass';
+              summary.can_merge = true;
+            }
+
+            // Add completion metadata
+            context_data.metadata.completed_at = new Date().toISOString();
+            const startTime = new Date(context_data.metadata.started_at);
+            const endTime = new Date(context_data.metadata.completed_at);
+            context_data.metadata.execution_time_ms = endTime - startTime;
+
+            fs.writeFileSync(process.env.CONTEXT_FILE, JSON.stringify(context_data, null, 2));
+
+            core.info('📊 Orchestration Summary:');
+            core.info(`   Total Validations: ${summary.total_validations}`);
+            core.info(`   ✅ Passed: ${summary.passed}`);
+            core.info(`   ❌ Failed: ${summary.failed}`);
+            core.info(`   ⚠️  Warnings: ${summary.warnings}`);
+            core.info(`   🔧 Auto-fixes attempted: ${summary.auto_fixes_attempted}`);
+            core.info(`   Final Status: ${summary.final_status}`);
+            core.info(`   Can Merge: ${summary.can_merge}`);
+
+            return context_data;
+
+      - name: Post Summary Comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const context_data = JSON.parse(fs.readFileSync(process.env.CONTEXT_FILE, 'utf8'));
+            const { summary, validations, auto_fixes_applied } = context_data;
+
+            const statusEmoji = {
+              pass: '✅',
+              fail: '❌',
+              warning: '⚠️',
+              pending: '⏳',
+              skipped: '⏭️',
+              error: '🔴'
+            };
+
+            const validationLines = Object.entries(validations).map(([name, result]) => {
+              const emoji = statusEmoji[result.status] || '❓';
+              return `- ${emoji} **${name}**: ${result.message}`;
+            });
+
+            const autoFixLines = auto_fixes_applied.length > 0
+              ? [
+                  '',
+                  '### 🔧 Auto-Fixes Attempted',
+                  '',
+                  ...auto_fixes_applied.map(fix =>
+                    `- **${fix.validation}**: ${fix.result} (${fix.strategy})`
+                  )
+                ]
+              : [];
+
+            const blockingIssuesSection = summary.blocking_issues.length > 0
+              ? [
+                  '',
+                  '### 🚫 Blocking Issues',
+                  '',
+                  ...summary.blocking_issues.map(issue => `- ${issue}`)
+                ]
+              : [];
+
+            const commentBody = [
+              `## 🎯 STREAM A Orchestrator Report`,
+              '',
+              `**Status**: ${statusEmoji[summary.final_status]} ${summary.final_status.toUpperCase()}`,
+              `**Can Merge**: ${summary.can_merge ? '✅ Yes' : '❌ No'}`,
+              '',
+              '### 📊 Validation Results',
+              '',
+              `Total: ${summary.total_validations} | Passed: ${summary.passed} | Failed: ${summary.failed} | Warnings: ${summary.warnings}`,
+              '',
+              ...validationLines,
+              ...autoFixLines,
+              ...blockingIssuesSection,
+              '',
+              '---',
+              `🤖 Orchestrated by STREAM A v${process.env.ORCHESTRATOR_VERSION}`,
+              `⏱️ Execution time: ${context_data.metadata.execution_time_ms}ms`
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: commentBody
+            });
+
+            core.info('✅ Summary comment posted');
+
+      - name: Set Final Status
+        if: always()
+        run: |
+          CONTEXT_DATA=$(cat ${{ env.CONTEXT_FILE }})
+          FINAL_STATUS=$(echo "$CONTEXT_DATA" | jq -r '.summary.final_status')
+          CAN_MERGE=$(echo "$CONTEXT_DATA" | jq -r '.summary.can_merge')
+
+          echo "Final Status: $FINAL_STATUS"
+          echo "Can Merge: $CAN_MERGE"
+
+          if [ "$FINAL_STATUS" == "fail" ]; then
+            echo "::error::❌ STREAM A Orchestration failed - cannot merge"
+            exit 1
+          elif [ "$FINAL_STATUS" == "warning" ]; then
+            echo "::warning::⚠️ STREAM A Orchestration completed with warnings"
+            exit 0
+          else
+            echo "::notice::✅ STREAM A Orchestration passed"
+            exit 0
+          fi
