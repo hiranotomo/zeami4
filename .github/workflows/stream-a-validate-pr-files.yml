@@ -1,8 +1,8 @@
 # Event Model v1 - STREAM A: PR-Lifecycle
-# Purpose: Validate required files in PR
+# Purpose: Validate required files in PR & Issue DoD checkboxes
 # Triggers: pull_request
 # Dependencies: None
-# Last updated: 2025-11-23
+# Last updated: 2025-11-24
 
 name: Validate Required Files
 
@@ -13,6 +13,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: read
 
 jobs:
   check-required-files:
@@ -111,6 +112,150 @@ jobs:
             }
 
             // ========== テスト追加の検証ここまで ==========
+
+      - name: Validate Issue DoD Checklist
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const prBody = pr.body || '';
+            const prTitle = pr.title;
+
+            // Extract issue number from PR title or body
+            const issuePatterns = [
+              /[Ii]ssue\s*#(\d+)/,
+              /[Cc]loses?\s*#(\d+)/,
+              /[Ff]ixes?\s*#(\d+)/,
+              /#(\d+)/
+            ];
+
+            let issueNumber = null;
+
+            // Check PR title first
+            for (const pattern of issuePatterns) {
+              const match = prTitle.match(pattern);
+              if (match) {
+                issueNumber = match[1];
+                break;
+              }
+            }
+
+            // Check PR body if not found
+            if (!issueNumber) {
+              for (const pattern of issuePatterns) {
+                const match = prBody.match(pattern);
+                if (match) {
+                  issueNumber = match[1];
+                  break;
+                }
+              }
+            }
+
+            if (!issueNumber) {
+              core.notice('⚠️ No issue reference found - skipping DoD validation');
+              return;
+            }
+
+            console.log(`Found issue reference: #${issueNumber}`);
+
+            // Fetch issue to check DoD checkboxes
+            try {
+              const { data: issue } = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: parseInt(issueNumber)
+              });
+
+              const issueBody = issue.body || '';
+
+              // Count checkboxes
+              const totalCheckboxes = (issueBody.match(/- \[[ xX]\]/g) || []).length;
+              const checkedCheckboxes = (issueBody.match(/- \[xX\]/g) || []).length;
+              const uncheckedCheckboxes = totalCheckboxes - checkedCheckboxes;
+
+              console.log(`Issue #${issueNumber} DoD: ${checkedCheckboxes}/${totalCheckboxes} items completed`);
+
+              if (totalCheckboxes === 0) {
+                core.warning(`Issue #${issueNumber} has no DoD checkboxes`);
+                return;
+              }
+
+              if (uncheckedCheckboxes > 0) {
+                const warningMessage = [
+                  `## ⚠️ Issue DoD Incomplete`,
+                  '',
+                  `Issue [#${issueNumber}](${issue.html_url}): "${issue.title}"`,
+                  '',
+                  `📊 Progress: ${checkedCheckboxes}/${totalCheckboxes} items completed (**${uncheckedCheckboxes} remaining**)`,
+                  '',
+                  '### ⚠️ Action Required',
+                  `Please complete all DoD checkboxes in Issue #${issueNumber} before merging this PR.`,
+                  '',
+                  '**Update the issue using:**',
+                  '```bash',
+                  `gh issue edit ${issueNumber}`,
+                  '```',
+                  '',
+                  '---',
+                  '🤖 Automated DoD validation'
+                ].join('\n');
+
+                core.warning(`⚠️ Issue #${issueNumber}: ${uncheckedCheckboxes} DoD item(s) unchecked`);
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body: warningMessage
+                });
+              } else {
+                console.log(`✅ Issue #${issueNumber}: All DoD checkboxes completed`);
+
+                const successMessage = [
+                  `## ✅ Issue DoD Completed`,
+                  '',
+                  `Issue [#${issueNumber}](${issue.html_url}) has all ${totalCheckboxes} DoD checkboxes checked.`,
+                  '',
+                  '✨ Ready to merge!',
+                  '',
+                  '---',
+                  '🤖 Automated DoD validation'
+                ].join('\n');
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body: successMessage
+                });
+              }
+            } catch (error) {
+              core.warning(`Failed to fetch issue #${issueNumber}: ${error.message}`);
+            }
+
+      - name: Check Phase Completion Files (continued)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const title = pr.title;
+
+            const phaseCompletionPattern = /フェーズ(\d+).*完了|phase\s*(\d+).*complete/i;
+            const match = title.match(phaseCompletionPattern);
+
+            if (!match) {
+              console.log('Not a phase completion PR, skipping file check');
+              return;
+            }
+
+            const phaseNum = match[1] || match[2];
+
+            // PRで変更されたファイルを取得
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
 
             // 必須ファイルの定義
             const requiredFiles = [
